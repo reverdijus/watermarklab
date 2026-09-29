@@ -1,0 +1,249 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------------ */
+/* Design tokens (ARCHITECTURE.md §10). Light by default, dark through       */
+/* prefers-color-scheme, and [data-theme] on <html> forces either mode.      */
+/* ------------------------------------------------------------------------ */
+:root {
+  color-scheme: light;
+  --bg: #faf9f5;
+  --sidebar: #f3f1ea;
+  --surface: #ffffff;
+  --surface-2: #f5f4ef;
+  --border: #e6e3d9;
+  --text: #1f1e1d;
+  --muted: #6e6c64;
+  --accent: #c6613f;
+  --accent-soft: #f5e6de;
+  --success: #3e7b57;
+  --warning: #a86b12;
+  --danger: #b3413a;
+  --info: #44689e;
+
+  /* Derived tokens */
+  --faint: #9a978d;
+  --border-strong: #d6d2c4;
+  --hover: rgba(31, 30, 29, 0.045);
+  --active: rgba(31, 30, 29, 0.075);
+  --accent-hover: #b4532f;
+  --accent-fg: #ffffff;
+  --overlay: rgba(31, 30, 29, 0.28);
+  --shadow-sm: 0 1px 2px rgba(31, 30, 29, 0.05);
+  --shadow-md: 0 1px 2px rgba(31, 30, 29, 0.04), 0 4px 16px rgba(31, 30, 29, 0.06);
+  --shadow-lg: 0 2px 6px rgba(31, 30, 29, 0.06), 0 16px 48px rgba(31, 30, 29, 0.14);
+
+  /* Chart palette (validated: dataviz validator, light surface #FFFFFF) */
+  --chart-1: #c6613f;
+  --chart-2: #3f6fb0;
+  --chart-3: #3e8a5e;
+  --chart-4: #7b5cb8;
+  --chart-5: #b8862b;
+  --chart-6: #c0567f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #262624;
+    --sidebar: #1f1e1d;
+    --surface: #30302e;
+    --surface-2: #393937;
+    --border: #44433f;
+    --text: #f5f4ee;
+    --muted: #a6a49b;
+    --accent: #d97757;
+    --accent-soft: #4a3129;
+    --success: #6dbb8a;
+    --warning: #e0a94a;
+    --danger: #e27d74;
+    --info: #86a8da;
+    --faint: #7c7a72;
+    --border-strong: #55534e;
+    --hover: rgba(245, 244, 238, 0.05);
+    --active: rgba(245, 244, 238, 0.09);
+    --accent-hover: #e0876a;
+    --accent-fg: #1f1e1d;
+    --overlay: rgba(0, 0, 0, 0.5);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.2), 0 4px 16px rgba(0, 0, 0, 0.25);
+    --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.3), 0 16px 48px rgba(0, 0, 0, 0.45);
+    --chart-1: #d0704f;
+    --chart-2: #5a8bd0;
+    --chart-3: #4e9e72;
+    --chart-4: #9278d4;
+    --chart-5: #ba8a2a;
+    --chart-6: #c8628c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #262624;
+  --sidebar: #1f1e1d;
+  --surface: #30302e;
+  --surface-2: #393937;
+  --border: #44433f;
+  --text: #f5f4ee;
+  --muted: #a6a49b;
+  --accent: #d97757;
+  --accent-soft: #4a3129;
+  --success: #6dbb8a;
+  --warning: #e0a94a;
+  --danger: #e27d74;
+  --info: #86a8da;
+  --faint: #7c7a72;
+  --border-strong: #55534e;
+  --hover: rgba(245, 244, 238, 0.05);
+  --active: rgba(245, 244, 238, 0.09);
+  --accent-hover: #e0876a;
+  --accent-fg: #1f1e1d;
+  --overlay: rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.2), 0 4px 16px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.3), 0 16px 48px rgba(0, 0, 0, 0.45);
+  --chart-1: #d0704f;
+  --chart-2: #5a8bd0;
+  --chart-3: #4e9e72;
+  --chart-4: #9278d4;
+  --chart-5: #ba8a2a;
+  --chart-6: #c8628c;
+}
+
+/* Tailwind theme mapping: classes such as bg-canvas, bg-surface, text-fg,   */
+/* text-muted, border-border, bg-accent, bg-accent-soft, text-danger…        */
+@theme inline {
+  --color-canvas: var(--bg);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-fg: var(--accent-fg);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+  --font-serif: ui-serif, "New York", Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+  --animate-fade-in: fade-in 140ms ease-out;
+  --animate-pop-in: pop-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  --animate-slide-in: slide-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.8); }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes pop-in {
+    from { opacity: 0; transform: translateY(4px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes slide-in {
+    from { transform: translateX(24px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+  }
+  /* Text that users may want to copy stays selectable. */
+  input,
+  textarea,
+  pre,
+  code,
+  .selectable,
+  [contenteditable] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  button {
+    cursor: default;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline-offset: 2px;
+  }
+  /* Discreet scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  /* Electron frameless window: draggable areas and interactive exceptions. */
+  .drag {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

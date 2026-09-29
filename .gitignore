@@ -1,0 +1,17 @@
+# Données locales de l'app (runs, index, caches, hôtes)
+.wmlab/
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# Desktop
+desktop/node_modules/
+desktop/dist/
+desktop/release/
+desktop/resources/workspace.json
+# Divers
+.DS_Store
+*.pt
+*.ckpt

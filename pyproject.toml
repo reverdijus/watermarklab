@@ -1,0 +1,51 @@
+[project]
+name = "wmlab"
+version = "0.1.0"
+description = "Watermark Lab — centraliser, lancer et suivre les entraînements de watermarking image/audio/vidéo"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.8",
+  "pyyaml>=6.0",
+  "numpy>=1.26",
+  "typer>=0.12",
+  "rich>=13.7",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch>=2.5",
+  "pillow>=10.4",
+  "av>=13.0",
+  "optuna>=4.1",
+  "psutil>=6.0",
+]
+server = [
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "optuna>=4.1",
+  "psutil>=6.0",
+]
+quality = [
+  "torchvision>=0.20",
+  "lpips>=0.1.4",
+  "pystoi>=0.4",
+]
+dev = [
+  "pytest>=8.3",
+  "httpx>=0.27",
+]
+
+[project.scripts]
+wmlab = "wmlab.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wmlab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

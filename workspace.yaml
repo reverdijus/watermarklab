@@ -1,0 +1,9 @@
+name: "Studio AI — Watermarking Lab"
+budget:
+  total_eur: 40000
+  start: "2026-10-01"
+  end: "2027-09-30"
+  manual_entries: []
+data_dir: .wmlab
+sync_interval_s: 30
+default_host: local
