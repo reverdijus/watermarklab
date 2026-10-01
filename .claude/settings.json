@@ -1,0 +1,55 @@
+{
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -m pytest*)",
+      "Bash(.venv/bin/python -m wmlab.cli validate*)",
+      "Bash(.venv/bin/python -m wmlab.cli registry*)",
+      "Bash(.venv/bin/python -m wmlab.cli plugin-test*)",
+      "Bash(.venv/bin/python -m wmlab.cli runs*)",
+      "Bash(.venv/bin/python -m wmlab.cli weights list*)",
+      "Bash(cd desktop && npm run build*)",
+      "Bash(cd desktop && npm run typecheck*)",
+      "Bash(cd desktop && npm test*)",
+      "Bash(bash deploy/tests_dry_run.sh*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git rev-parse*)",
+      "Bash(git ls-files*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./.wmlab/users.yaml)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/validate_specs.py\"",
+            "timeout": 90
+          }
+        ]
+      }
+    ]
+  }
+}
