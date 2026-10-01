@@ -1,0 +1,22 @@
+# Projet « Image — HiDDeN baseline » — format : ARCHITECTURE.md §5.2
+#
+# Un projet regroupe tout ce qui concerne UN schéma de watermarking : une modalité, une taille
+# de message, des objectifs (les deux axes du front de Pareto) et un benchmark de référence.
+# Ses expériences sont dans experiments/, ses plans d'HPO dans hpo/, son journal dans notes.md.
+name: image-hidden                   # = nom du dossier projects/image-hidden
+title: "Image — HiDDeN baseline"
+modality: image                      # image | audio | video — fixé pour tout le projet
+description: >-
+  Premier schéma image (encodeur/décodeur convolutifs à la HiDDeN) : sert à valider le
+  pipeline de bout en bout (curriculum, HPO, benchmark), puis de référence pour les
+  architectures suivantes.
+message_bits: 48                     # taille du message = nbits passé aux modèles (jamais dans model.params)
+default_benchmark: image_v1          # benchmark utilisé par le classement et les évaluations par défaut
+
+# Les deux axes des tableaux de bord (Pareto imperceptibilité × robustesse).
+# metric = clé du résumé d'évaluation (EvalResult.summary) ou, à défaut, de validation (val/<metric>).
+objectives:
+  quality:    {metric: psnr, direction: maximize, label: "PSNR (dB)", constraint: ">= 38"}
+  robustness: {metric: bit_acc_mean, direction: maximize, label: "Bit acc. moyenne"}
+
+tags: [image, baseline, hidden]

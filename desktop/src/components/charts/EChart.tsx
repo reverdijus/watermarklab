@@ -48,7 +48,11 @@ export interface EChartProps {
   style?: CSSProperties;
   /** Event handlers, e.g. { click: (p) => … }. */
   onEvents?: Record<string, EChartEventHandler>;
-  /** Replace the whole option on update (default true). */
+  /**
+   * Replace the whole option on update. Default false: updates are merged
+   * (series and dataZoom replaced by id) so live refreshes keep the zoom
+   * window and do not replay the entry animation.
+   */
   notMerge?: boolean;
   loading?: boolean;
   /** Overlay shown instead of the chart (e.g. "Aucune donnée"). */
@@ -66,7 +70,7 @@ export function EChart({
   className,
   style,
   onEvents,
-  notMerge = true,
+  notMerge = false,
   loading,
   empty,
   onReady,
@@ -113,7 +117,10 @@ export function EChart({
       animationDuration: 350,
       animationDurationUpdate: 250,
     };
-    chart.setOption({ ...base, ...option }, { notMerge, lazyUpdate: true });
+    chart.setOption(
+      { ...base, ...option },
+      notMerge ? { notMerge: true, lazyUpdate: true } : { replaceMerge: ["series", "dataZoom", "visualMap"], lazyUpdate: true },
+    );
   }, [option, notMerge, tokens]);
 
   // Event binding (stable wrappers reading the latest handlers).

@@ -1,0 +1,19 @@
+# Catalogue de datasets — format : ARCHITECTURE.md §5.6
+# Une expérience y fait référence avec « @coco2017 », par ex. :
+#   data.train: {dataset: image_folder, params: {root: "@coco2017"}}
+# Le chemin est résolu selon l'hôte courant (WMLAB_HOST) : paths[<hôte>], sinon paths.default
+# (« ~ » est étendu). Aucune donnée n'est téléchargée automatiquement.
+name: coco2017
+modality: image
+description: >-
+  COCO 2017 train : ~118 000 photos du quotidien (Flickr), très diverses. Données
+  d'entraînement de référence pour le watermarking image (HiDDeN, Stable Signature…).
+  Téléchargement : http://images.cocodataset.org/zips/train2017.zip (~18 Go, à dézipper).
+source: "https://cocodataset.org"
+license: >-
+  Annotations : CC BY 4.0 (COCO Consortium). Images : propriété de leurs auteurs, usage soumis
+  aux conditions d'utilisation de Flickr (le consortium ne détient pas les droits des images).
+paths:
+  default: "~/datasets/coco/train2017"
+  # Exemple d'hôte Scaleway (la clé = nom de l'hôte dans .wmlab/hosts.yaml) :
+  # scw-l40s: "/root/datasets/coco/train2017"

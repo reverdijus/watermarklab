@@ -18,7 +18,6 @@ from wmlab.spec.models import (
     BenchmarkSpec,
     DatasetCatalogEntry,
     ExperimentSpec,
-    HostsFile,
     HostSpec,
     HpoSpec,
     ProjectSpec,
@@ -259,6 +258,22 @@ def apply_overrides(spec_dict: dict[str, Any], overrides: dict[str, Any] | None)
     return result
 
 
+def apply_experiment_overrides(raw: dict[str, Any], overrides: dict[str, Any] | None
+                               ) -> dict[str, Any]:
+    """Apply overrides to a raw experiment dict, falling back to its defaults-filled form.
+
+    This allows e.g. ``resources.device=cpu`` when ``resources`` is absent from the YAML.
+    """
+    try:
+        return apply_overrides(raw, overrides)
+    except OverrideError as original:
+        try:
+            resolved = ExperimentSpec.model_validate(raw).model_dump(mode="json")
+        except ValidationError:
+            raise original from None
+        return apply_overrides(resolved, overrides)
+
+
 def get_path(data: Any, path: str) -> Any:
     """Return the value at a dotted path (``KeyError`` if unresolvable)."""
     node = data
@@ -361,7 +376,7 @@ def load_experiment(spec_path: str | Path, overrides: dict[str, Any] | None = No
         raw = {}
     if not isinstance(raw, dict):
         raise SpecError([{"loc": "", "msg": "le fichier doit contenir un dictionnaire YAML"}], path)
-    data = apply_overrides(raw, overrides)
+    data = apply_experiment_overrides(raw, overrides)
     spec = validate_data(data, "experiment", path)
     _, project = project_for(path)
     return spec, project, spec.model_dump(mode="json")

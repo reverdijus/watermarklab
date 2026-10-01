@@ -47,7 +47,8 @@ export function LaunchProvider({ children }: { children: ReactNode }) {
   }, []);
   const closeLaunch = useCallback(() => setState((s) => ({ ...s, open: false })), []);
 
-  useHotkey("mod+n", () => openLaunch());
+  // ⌘N while the dialog is already open must not remount it (the form would be reset).
+  useHotkey("mod+n", () => openLaunch(), { enabled: !state.open });
 
   const value = useMemo(() => ({ openLaunch, closeLaunch, isOpen: state.open }), [openLaunch, closeLaunch, state.open]);
 

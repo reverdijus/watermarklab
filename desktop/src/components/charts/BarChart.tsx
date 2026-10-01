@@ -86,6 +86,7 @@ export function BarChart({
       xAxis: horizontal ? valAxis : catAxis,
       yAxis: horizontal ? catAxis : valAxis,
       series: series.map((s, i) => ({
+        id: `bar-${i}-${s.name}`,
         type: "bar",
         name: s.name,
         data: s.values,

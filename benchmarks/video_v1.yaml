@@ -1,0 +1,33 @@
+# Benchmark vidéo v1 — suite d'évaluation FIGÉE (format : ARCHITECTURE.md §5.5)
+#
+# ⚠️  Ne JAMAIS modifier une version publiée : les résultats déjà enregistrés
+#     (eval/<checkpoint>__video_v1.json) ne seraient plus comparables entre eux.
+#     Pour changer de données, d'attaques ou de métriques : créer benchmarks/video_v2.yaml
+#     (ex. video_folder avec root: "@sav", clips plus longs et plus grands).
+#
+# Cette v1 tourne sur des données synthétiques (formes en mouvement, seed fixe) en attendant
+# les données réelles : 64 clips de 8 frames 64×64 à 24 fps ; attaques à strength = 1.
+# Le résumé bit_acc_mean / tpr@<fpr>_mean moyenne toutes les attaques SAUF identity.
+name: video_v1
+version: 1
+modality: video
+description: "Suite vidéo v1 (synthétique, 64 clips de 8 frames 64 px) — ne jamais modifier : créer video_v2"
+
+data:
+  dataset: synthetic
+  params: {modality: video, size: 64, frames: 8, num_items: 64, seed: 1234}
+  preprocess: []
+  limit: 64
+
+batch_size: 8
+seed: 0
+quality_metrics: [psnr, ssim, flicker]   # flicker : scintillement temporel introduit par la marque
+fpr: [1.0e-2, 1.0e-4, 1.0e-6]
+
+attacks:
+  - {label: none, name: identity}
+  - {label: h264_crf23, name: h264, params: {crf: 23}}               # codec réel (PyAV/libx264)
+  - {label: h264_crf28, name: h264, params: {crf: 28}}
+  - {label: frame_drop_20, name: frame_drop, params: {p: 0.2}}       # 20 % des frames remplacées par la précédente
+  - {label: framewise_jpeg50, name: framewise, params: {attack: jpeg, params: {quality: 50}}}
+  - {label: temporal_blur, name: temporal_blur, params: {weight: 0.3}}

@@ -1,0 +1,15 @@
+# Watermark Lab — reverse proxy HTTPS (ARCHITECTURE.md §12.7).
+# Installé dans /etc/caddy/Caddyfile par deploy/install_server.sh (__DOMAIN__ et __WMLAB_PORT__
+# remplacés). Caddy obtient et renouvelle le certificat Let's Encrypt automatiquement : le DNS
+# du domaine doit pointer vers cette machine et les ports 80/443 être ouverts (groupe de sécurité).
+__DOMAIN__ {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+    # Le backend n'écoute que sur 127.0.0.1 : tout passe par ce proxy (jeton exigé par l'API).
+    reverse_proxy 127.0.0.1:__WMLAB_PORT__
+}

@@ -7,7 +7,14 @@ from wmlab.tracking.checkpoints import (
     load_index,
     resolve_checkpoint,
 )
-from wmlab.tracking.io import atomic_write_json, atomic_write_text, read_json, read_jsonl, sanitize
+from wmlab.tracking.io import (
+    append_jsonl,
+    atomic_write_json,
+    atomic_write_text,
+    read_json,
+    read_jsonl,
+    sanitize,
+)
 from wmlab.tracking.params import flatten_params
 from wmlab.tracking.reader import (
     LOST_AFTER_S,
@@ -23,9 +30,17 @@ from wmlab.tracking.reader import (
     read_heartbeat,
     uniform_indices,
 )
-from wmlab.tracking.run import Run, RunTerminated, default_notes
+from wmlab.tracking.run import (
+    Run,
+    RunTerminated,
+    append_event,
+    default_notes,
+    log_eval_to,
+    write_eval_file,
+)
 
 __all__ = [
+    "append_event", "append_jsonl", "log_eval_to", "write_eval_file",
     "CHECKPOINT_FORMAT", "CheckpointNotFoundError", "LOST_AFTER_S", "Run", "RunReader",
     "RunTerminated", "StudyReader", "atomic_write_json", "atomic_write_text", "checkpoint_name",
     "cost_eur", "default_notes", "derive_status", "downsample_series", "duration_s",

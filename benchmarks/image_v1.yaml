@@ -1,0 +1,44 @@
+# Benchmark image v1 — suite d'évaluation FIGÉE (format : ARCHITECTURE.md §5.5)
+#
+# ⚠️  Ne JAMAIS modifier une version publiée : les résultats déjà enregistrés
+#     (eval/<checkpoint>__image_v1.json) ne seraient plus comparables entre eux.
+#     Pour changer de données, d'attaques ou de métriques : créer benchmarks/image_v2.yaml
+#     (ex. sur DIV2K : image_folder avec root: "@div2k_valid", ou sur COCO : "@coco2017").
+#
+# Cette v1 tourne sur des données synthétiques (seed fixe) en attendant les données réelles :
+# elle sert à valider le pipeline et à comparer les runs entre eux, pas à publier des chiffres.
+# Toutes les attaques sont appliquées à strength = 1 (sévérité indiquée par les params).
+# Le résumé bit_acc_mean / tpr@<fpr>_mean moyenne toutes les attaques SAUF identity.
+name: image_v1
+version: 1
+modality: image
+description: "Suite image v1 (synthétique, 64 images 128 px) — ne jamais modifier : créer image_v2"
+
+data:
+  dataset: synthetic
+  params: {modality: image, size: 128, num_items: 64, seed: 1234}
+  preprocess: []
+  limit: 64
+
+batch_size: 16
+seed: 0                              # graine des messages et des attaques aléatoires (crop…)
+quality_metrics: [psnr, ssim]        # imperceptibilité (original vs tatoué, sans attaque)
+fpr: [1.0e-2, 1.0e-4, 1.0e-6]        # taux de faux positifs pour les TPR (seuils binomiaux exacts)
+
+attacks:
+  - {label: none, name: identity}
+  - {label: jpeg_q50, name: jpeg, params: {quality: 50}}
+  - {label: jpeg_q80, name: jpeg, params: {quality: 80}}
+  - {label: blur_s2, name: gaussian_blur, params: {sigma: 2.0}}
+  - {label: noise_006, name: gaussian_noise, params: {std: 0.06}}
+  - {label: crop_50, name: crop, params: {area: 0.5}}
+  - {label: resize_50, name: resize, params: {scale: 0.5}}
+  - {label: rotate_10, name: rotate, params: {degrees: 10}}
+  - {label: brightness_03, name: brightness, params: {delta: 0.3}}
+  - {label: contrast_05, name: contrast, params: {factor: 0.5}}
+  - label: combo_jpeg_crop           # attaques enchaînées : crop 50 % puis JPEG q50
+    name: combo
+    params:
+      attacks:
+        - {name: crop, params: {area: 0.5}}
+        - {name: jpeg, params: {quality: 50}}

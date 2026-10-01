@@ -374,19 +374,15 @@ def new_experiment(project: str, name: str, *, from_experiment: str | None = Non
     target = project_dir / "experiments" / f"{name}.yaml"
     if target.exists():
         raise FileExistsError(f"l'expérience '{name}' existe déjà ({target})")
+    modality = _project_modality(project_dir)
     if from_experiment:
         source = project_dir / "experiments" / f"{Path(from_experiment).stem}.yaml"
         if not source.is_file():
             available = sorted(p.stem for p in (project_dir / "experiments").glob("*.yaml"))
             raise ScaffoldError(f"expérience source inconnue '{from_experiment}' — disponibles : "
                                 f"{', '.join(available) if available else '(aucune)'}")
-        text = source.read_text(encoding="utf-8")
-        new_text, count = re.subn(r"(?m)^name:.*$", f"name: {name}", text, count=1)
-        if count == 0:
-            new_text = f"name: {name}\n" + text
-        header = f"# Copie de « {source.stem} »\n"
-        return _write_new(target, header + new_text)
-    modality = _project_modality(project_dir)
+        return _write_new(target, copy_experiment_text(source.read_text(encoding="utf-8"),
+                                                       source.stem, name, project, modality))
     try:
         project_data = yaml.safe_load((project_dir / "project.yaml").read_text("utf-8")) or {}
     except (OSError, yaml.YAMLError):
@@ -395,27 +391,141 @@ def new_experiment(project: str, name: str, *, from_experiment: str | None = Non
     return _write_new(target, experiment_template(name, project, modality, benchmark))
 
 
+_COPY_HEADER = Template("""\
+# Expérience « $name » — projet $project ($modality) — copie de « $source »
+# Format : ARCHITECTURE.md §5.3
+# Vérifier : wmlab validate <ce fichier>  ·  essai rapide : wmlab train <ce fichier> --smoke
+""")
+_TOP_LEVEL_KEY_RE = re.compile(r"^(name|description|hypothesis|tags):")
+
+
+def copy_experiment_text(text: str, source: str, name: str, project: str, modality: str) -> str:
+    """Text of a new experiment copied from ``source``: fresh header, ``name``, placeholders for
+    ``description``/``hypothesis`` and empty ``tags`` (the copy is a new experiment: inherited
+    words would pass unnoticed and inherited tags would label its runs after the source)."""
+    lines = text.splitlines()
+    # drop the leading comment header of the source (replaced by the copy header)
+    body_start = 0
+    while body_start < len(lines) and (not lines[body_start].strip()
+                                       or lines[body_start].lstrip().startswith("#")):
+        body_start += 1
+    body = lines[body_start:]
+    seen: set[str] = set()
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        line = body[i]
+        match = _TOP_LEVEL_KEY_RE.match(line)
+        if match is None:
+            out.append(line)
+            i += 1
+            continue
+        key = match.group(1)
+        seen.add(key)
+        i += 1
+        # skip the continuation lines of a block scalar / multi-line value (indented)
+        while i < len(body) and body[i][:1] in (" ", "\t") and body[i].strip():
+            i += 1
+        if key == "name":
+            out.append(f"name: {name}")
+        elif key == "description":
+            out.append(f"description: \"À compléter : ce que cette expérience teste (copie de "
+                       f"« {source} »)\"")
+        elif key == "hypothesis":
+            out.append("hypothesis: \"À compléter : résultat attendu et pourquoi\"")
+        else:
+            out.append(f"tags: []                            # tags propres à cette expérience "
+                       f"(ceux de « {source} » ne sont pas hérités)")
+    missing = []
+    if "name" not in seen:
+        missing.append(f"name: {name}")
+    if "description" not in seen:
+        missing.append(f"description: \"À compléter : ce que cette expérience teste (copie de "
+                       f"« {source} »)\"")
+    if "hypothesis" not in seen:
+        missing.append("hypothesis: \"À compléter : résultat attendu et pourquoi\"")
+    header = _COPY_HEADER.substitute(name=name, project=project, modality=modality,
+                                     source=source)
+    return header + "\n".join(missing + out).rstrip("\n") + "\n"
+
+
 # -- HPO plan -------------------------------------------------------------------------------
 HPO_TEMPLATE = Template("""\
 # Plan HPO « $name » — explore des hyperparamètres de l'expérience « $experiment »
 # Format : ARCHITECTURE.md §5.4  ·  essai rapide : wmlab hpo <ce fichier> --smoke
+# Méthodologie (hyperparamètres scientifiques / de nuisance, pruner, fidélité) : skill
+# wmlab-experiment, references/hpo-guide.md.
 name: $name
 experiment: $experiment
 description: "À compléter : ce que l'on cherche à optimiser"
 hypothesis: "À compléter"
-sampler: {name: tpe, params: {}}     # tpe | random | nsga2 | cmaes | grid
-pruner: {name: asha, params: {}}     # asha | hyperband | median | none (ignoré si multi-objectif)
+sampler: {name: tpe, params: {n_startup_trials: 8}}   # tpe | random | nsga2 | cmaes | grid
+# ASHA compare les essais à steps égaux : il ne décide qu'aux paliers min_resource × 3^k
+# (les autres validations ne comptent pas). min_resource = fin de la 1re phase (warmup de
+# décodage : $min_resource steps en basse fidélité) : avant, le décodeur n'a pas accroché et
+# l'élagage serait un tirage au sort. Ne pas mettre la durée des phases dans `space` avec asha
+# (comparaison biaisée) : hyperband ou none dans ce cas.
+pruner: {name: asha, params: {min_resource: $min_resource, reduction_factor: 3}}   # asha | hyperband | median | none
 objectives:                          # plusieurs objectifs ⇒ front de Pareto (sans pruning)
   - {metric: $robustness, direction: maximize}
 constraints:                         # essais hors contrainte exclus du meilleur résultat
   - {metric: val/$quality, op: ">=", value: $threshold}
 space:                               # chemins pointés dans l'expérience de base
   optimizer.lr: {type: float, low: 1.0e-4, high: 3.0e-3, log: true}
-$term_line  phases.0.steps: {type: int, low: $steps_low, high: $steps_high, step: $steps_low}
-fidelity: {steps_scale: 0.25, overrides: {}}   # proxy basse fidélité appliqué à chaque essai
+$term_line  # phases.0.steps: {type: int, low: $steps_low, high: $steps_high, step: $steps_low}   # durée : avec pruner hyperband/none seulement
+# Proxy basse fidélité appliqué à CHAQUE essai : steps_scale multiplie les steps ET les
+# warmup_steps de chaque phase ; pas de benchmark final (on évaluera le meilleur essai relancé
+# en pleine fidélité).
+fidelity:
+  steps_scale: $steps_scale
+  overrides:
+    eval.every_steps: $eval_every        # ≥ 3 validations par essai pour le pruner
+    eval.final_benchmark: null
 budget: {max_trials: 20, max_hours: 6, max_eur: 50, parallel: 1}
 objective_agg: last                  # last | best (valeur retenue pour chaque essai)
 """)
+
+STEPS_SCALE = 0.25
+MSE_LIKE = ("mse", "l1")
+
+
+def _nice_steps(value: float) -> int:
+    """Round a step count down to a readable multiple (50, 10 or 1)."""
+    value = max(1, int(value))
+    for unit in (50, 10):
+        if value >= 2 * unit:
+            return value - value % unit
+    return value
+
+
+def _hpo_term_line(exp: dict[str, Any]) -> str:
+    """Search-space line of the first non-message loss term — on a path that has an effect.
+
+    ``loss.terms.<t>.weight`` is overridden by ``phases.<i>.loss_weights.<t>`` (§5.3): when
+    every phase sets the term, the last phase's value (end of its ramp) is searched instead.
+    """
+    terms: dict[str, Any] = ((exp.get("loss") or {}).get("terms") or {}) if isinstance(exp, dict) else {}
+    term = next((t for t, sp in terms.items()
+                 if isinstance(sp, dict) and sp.get("name") != "message_bce"), None)
+    if term is None:
+        return ""
+    loss_name = str(terms[term].get("name") or "")
+    bounds = ("low: 10.0, high: 1000.0, log: true" if loss_name in MSE_LIKE
+              else "low: 0.1, high: 10.0, log: true")
+    phases = exp.get("phases") if isinstance(exp.get("phases"), list) else []
+    overridden = phases and all(isinstance(p, dict) and term in (p.get("loss_weights") or {})
+                                for p in phases)
+    if overridden:
+        last = len(phases) - 1
+        value = (phases[-1].get("loss_weights") or {}).get(term)
+        path = f"phases.{last}.loss_weights.{term}"
+        if isinstance(value, dict) and isinstance(value.get("ramp"), list):
+            path += ".ramp.1"
+        comment = f"poids « {term} » de la dernière phase (loss.terms.{term}.weight est écrasé par les phases)"
+    else:
+        path = f"loss.terms.{term}.weight"
+        comment = f"poids de base du terme « {term} »"
+    return f"  {path}: {{type: float, {bounds}}}   # {comment}\n"
 
 
 def new_hpo(project: str, name: str, experiment: str, *, workspace: Path | None = None) -> Path:
@@ -436,22 +546,27 @@ def new_hpo(project: str, name: str, experiment: str, *, workspace: Path | None 
         exp = yaml.safe_load(exp_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError:
         exp = {}
-    terms: dict[str, Any] = ((exp.get("loss") or {}).get("terms") or {}) if isinstance(exp, dict) else {}
-    term = next((t for t, s in terms.items()
-                 if isinstance(s, dict) and s.get("name") != "message_bce"), None)
-    term_line = (f"  loss.terms.{term}.weight: {{type: float, low: 0.1, high: 3.0}}\n"
-                 if term else "")
-    phases = exp.get("phases") if isinstance(exp, dict) else None
-    first_steps = phases[0].get("steps") if phases and isinstance(phases[0], dict) else None
+    if not isinstance(exp, dict):
+        exp = {}
+    phases = exp.get("phases") if isinstance(exp.get("phases"), list) else []
+    first = phases[0] if phases and isinstance(phases[0], dict) else {}
+    first_steps = first.get("steps")
     base = int(first_steps) if isinstance(first_steps, int) and first_steps > 0 else 2000
     steps_low = max(base // 4, 1)
-    has_val_attacks = bool(((exp.get("eval") or {}).get("val_attacks")) if isinstance(exp, dict)
-                           else False)
+    first_scaled = max(1, round(base * STEPS_SCALE))
+    every = (exp.get("eval") or {}).get("every_steps") if isinstance(exp.get("eval"), dict) else None
+    total = sum(int(p.get("steps") or 0) for p in phases if isinstance(p, dict)
+                and isinstance(p.get("steps"), int)) or base
+    eval_every = _nice_steps(min(int(every) if isinstance(every, int) and every > 0 else total,
+                                 total * STEPS_SCALE / 4))
+    has_val_attacks = bool(((exp.get("eval") or {}).get("val_attacks"))
+                           if isinstance(exp.get("eval"), dict) else False)
     text = HPO_TEMPLATE.substitute(
         name=name, experiment=experiment,
         robustness="val/bit_acc_mean" if has_val_attacks else "val/bit_acc",
         quality=DEFAULT_QUALITY_METRIC[modality], threshold=QUALITY_THRESHOLD[modality],
-        term_line=term_line, steps_low=steps_low, steps_high=steps_low * 8,
+        term_line=_hpo_term_line(exp), steps_low=steps_low, steps_high=steps_low * 8,
+        min_resource=first_scaled, steps_scale=STEPS_SCALE, eval_every=eval_every,
     )
     return _write_new(target, text)
 
@@ -549,7 +664,7 @@ Utiliser : model: {name: $name, params: {channels: 32}} dans une expérience.
 from __future__ import annotations
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor, nn
 
 from wmlab.models.base import WatermarkModel
@@ -559,8 +674,10 @@ from wmlab.registry import MODELS
 class ${cls}Params(BaseModel):
     """Hyperparamètres exposés dans le YAML (model.params) — ne jamais y mettre nbits."""
 
-    channels: int = Field(32, gt=0)
-    strength: float = Field(1.0, gt=0)
+    model_config = ConfigDict(extra="forbid")  # une clé inconnue dans le YAML = erreur
+
+    channels: int = Field(32, gt=0, description="Largeur des convolutions (canaux)")
+    strength: float = Field(1.0, gt=0, description="Amplitude du résidu : ↑ robustesse, ↓ qualité")
 
 
 @MODELS.register("$name", modality="$modality", params=${cls}Params)
@@ -588,7 +705,7 @@ Vérifier : wmlab plugin-test attack $name
 from __future__ import annotations
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor
 
 from wmlab.attacks.base import Attack
@@ -598,7 +715,9 @@ from wmlab.registry import ATTACKS
 class ${cls}Params(BaseModel):
     """Sévérité à strength=1."""
 
-    amount: float = Field(0.05, ge=0)
+    model_config = ConfigDict(extra="forbid")  # une clé inconnue dans le YAML = erreur
+
+    amount: float = Field(0.05, ge=0, description="Sévérité de l'attaque à strength = 1")
 
 
 @ATTACKS.register("$name", modality="$modality", params=${cls}Params)
@@ -621,11 +740,13 @@ class $cls(Attack):
 ''')
 
 DATASET_ITEM = {
-    "image": ("size: int = Field(64, gt=0)", "size: int = 64",
+    "image": ('size: int = Field(64, gt=0, description="Côté des images (pixels)")', "size: int = 64",
               "torch.rand(3, self.size, self.size, generator=g)", "[3, H, W] dans [0, 1]"),
-    "audio": ("length: int = Field(16000, gt=0)", "length: int = 16000",
+    "audio": ('length: int = Field(16000, gt=0, description="Longueur des clips (échantillons)")',
+              "length: int = 16000",
               "torch.rand(1, self.length, generator=g) * 1.8 - 0.9", "[1, T] dans [-1, 1]"),
-    "video": ("size: int = Field(64, gt=0)\n    frames: int = Field(8, gt=0)",
+    "video": ('size: int = Field(64, gt=0, description="Côté des frames (pixels)")\n'
+              '    frames: int = Field(8, gt=0, description="Frames par clip")',
               "size: int = 64, frames: int = 8",
               "torch.rand(self.frames, 3, self.size, self.size, generator=g)",
               "[F, 3, H, W] dans [0, 1]"),
@@ -642,7 +763,7 @@ Vérifier : wmlab plugin-test dataset $name
 from __future__ import annotations
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from torch.utils.data import Dataset
 
 from wmlab.registry import DATASETS
@@ -651,10 +772,12 @@ from wmlab.registry import DATASETS
 class ${cls}Params(BaseModel):
     """Paramètres exposés dans le YAML (data.train.params)."""
 
-    root: str | None = None
-    num_items: int = Field(64, gt=0)
+    model_config = ConfigDict(extra="forbid")  # une clé inconnue dans le YAML = erreur
+
+    root: str | None = Field(None, description="Dossier des fichiers (ou « @<dataset> » du catalogue)")
+    num_items: int = Field(64, gt=0, description="Nombre d'items")
     $param_field
-    seed: int = 0
+    seed: int = Field(0, description="Graine des données procédurales")
 
 
 @DATASETS.register("$name", modality="$modality", params=${cls}Params)
@@ -682,12 +805,12 @@ $assign        self.seed = seed
 ''')
 
 PREPROCESS_BODY = {
-    "image": ("gamma", "float = Field(1.0, gt=0)", "x.clamp(0.0, 1.0) ** self.gamma",
-              "correction gamma"),
-    "video": ("gamma", "float = Field(1.0, gt=0)", "x.clamp(0.0, 1.0) ** self.gamma",
-              "correction gamma (frame par frame)"),
-    "audio": ("gain", "float = Field(1.0, gt=0)", "(x * self.gain).clamp(-1.0, 1.0)",
-              "gain constant"),
+    "image": ("gamma", 'float = Field(1.0, gt=0, description="Exposant de la correction gamma")',
+              "x.clamp(0.0, 1.0) ** self.gamma", "correction gamma"),
+    "video": ("gamma", 'float = Field(1.0, gt=0, description="Exposant de la correction gamma")',
+              "x.clamp(0.0, 1.0) ** self.gamma", "correction gamma (frame par frame)"),
+    "audio": ("gain", 'float = Field(1.0, gt=0, description="Gain linéaire appliqué au signal")',
+              "(x * self.gain).clamp(-1.0, 1.0)", "gain constant"),
 }
 
 PREPROCESS_TEMPLATE = Template('''\
@@ -699,7 +822,7 @@ Vérifier : wmlab plugin-test preprocess $name
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor
 
 from wmlab.registry import PREPROCESS
@@ -707,6 +830,8 @@ from wmlab.registry import PREPROCESS
 
 class ${cls}Params(BaseModel):
     """Paramètres exposés dans le YAML (preprocess: [{name: $name, params: {...}}])."""
+
+    model_config = ConfigDict(extra="forbid")  # une clé inconnue dans le YAML = erreur
 
     $param: $param_type
 
@@ -738,7 +863,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor, nn
 
 from wmlab.registry import LOSSES
@@ -750,7 +875,9 @@ if TYPE_CHECKING:
 class ${cls}Params(BaseModel):
     """Paramètres exposés dans le YAML (loss.terms.<terme>.params)."""
 
-    scale: float = Field(1.0, gt=0)
+    model_config = ConfigDict(extra="forbid")  # une clé inconnue dans le YAML = erreur
+
+    scale: float = Field(1.0, gt=0, description="Facteur multiplicatif du terme")
 
 
 @LOSSES.register("$name", modality=$modality_decl, params=${cls}Params)

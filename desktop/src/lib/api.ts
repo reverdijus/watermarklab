@@ -1,10 +1,12 @@
 /**
- * Typed HTTP client for every route of ARCHITECTURE.md §9.
+ * Typed HTTP client for every route of ARCHITECTURE.md §9 and §12.
  *
  * Connection settings are detected once:
- *  1. Electron: `window.wmlab` exposed by the preload script;
+ *  1. Electron: `window.wmlab` exposed by the preload script (local backend started by the
+ *     main process, or a remote server chosen through the "Serveur" menu — `mode`);
  *  2. Vite dev server in a browser: `VITE_API_BASE` / `VITE_API_TOKEN`;
- *  3. Browser served by FastAPI: `window.location.origin` + `?token=` (then sessionStorage).
+ *  3. Browser served by FastAPI: `window.location.origin` (or a server URL chosen on the
+ *     login screen) + `?token=` (then localStorage `wmlab.token`).
  */
 import type {
   BenchmarkInfo,
@@ -16,19 +18,26 @@ import type {
   CreateProjectBody,
   Costs,
   DatasetInfo,
+  DecommissionBody,
+  DecommissionResult,
   EstimateBody,
   FileContent,
+  GitState,
   Health,
   Host,
+  HostInstance,
+  HostInventory,
   HostTestResult,
   Job,
   JobEstimate,
   Leaderboard,
   LeaderboardQuery,
   LogsResponse,
+  Me,
   MetricsResponse,
   OkResponse,
   Overview,
+  PoweroffResult,
   ProjectDetail,
   ProjectSummary,
   RegistryResponse,
@@ -39,10 +48,13 @@ import type {
   StudyDetail,
   StudySummary,
   SystemResponse,
+  UserInfo,
   ValidateBody,
   ValidateResult,
   WorkspaceSettings,
 } from "./types";
+
+export type ConnectionMode = "local" | "remote";
 
 export interface ApiConfig {
   apiBase: string;
@@ -50,9 +62,13 @@ export interface ApiConfig {
   platform: string;
   /** Where the settings came from (useful in diagnostics). */
   source: "electron" | "vite-env" | "browser";
+  /** Electron: local backend started by the app, or remote server (§12.6). Browser: always "remote". */
+  mode: ConnectionMode;
 }
 
-const TOKEN_STORAGE_KEY = "wmlab.token";
+/** localStorage keys of the browser session (§12.6). */
+export const TOKEN_STORAGE_KEY = "wmlab.token";
+export const API_BASE_STORAGE_KEY = "wmlab.apiBase";
 
 function readTokenFromLocation(): string | null {
   const fromSearch = new URLSearchParams(window.location.search).get("token");
@@ -75,6 +91,40 @@ function scrubTokenFromLocation(): void {
   }
 }
 
+function storageGet(storage: "local" | "session", key: string): string | null {
+  try {
+    return (storage === "local" ? window.localStorage : window.sessionStorage).getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storageSet(key: string, value: string | null): void {
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable (private mode, quota): the session lives in memory only */
+  }
+}
+
+/** Normalise a server URL typed by a user ("lab.example.com/" → "https://lab.example.com"). */
+export function normalizeApiBase(raw: string): string | null {
+  let s = raw.trim();
+  if (!s) return null;
+  // No scheme: https, except for loopback addresses (a local backend has no certificate).
+  if (!/^https?:\/\//i.test(s)) s = `${/^(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(s) ? "http" : "https"}://${s}`;
+  try {
+    const url = new URL(s);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    url.search = "";
+    return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
 function detectConfig(): ApiConfig {
   const bridge = typeof window !== "undefined" ? window.wmlab : undefined;
   if (bridge?.apiBase) {
@@ -83,6 +133,7 @@ function detectConfig(): ApiConfig {
       token: bridge.token ?? "",
       platform: bridge.platform ?? "darwin",
       source: "electron",
+      mode: bridge.mode === "remote" ? "remote" : "local",
     };
   }
   const envBase = import.meta.env.VITE_API_BASE;
@@ -92,21 +143,22 @@ function detectConfig(): ApiConfig {
       token: import.meta.env.VITE_API_TOKEN ?? "",
       platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : "web",
       source: "vite-env",
+      mode: "remote",
     };
   }
+  // Browser: `?token=` wins and is memorised (localStorage, then the legacy sessionStorage
+  // entry of previous versions).
   let token = readTokenFromLocation();
-  try {
-    if (token) window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-    else token = window.sessionStorage.getItem(TOKEN_STORAGE_KEY);
-  } catch {
-    /* sessionStorage unavailable: keep the URL token only */
-  }
+  if (token) storageSet(TOKEN_STORAGE_KEY, token);
+  else token = storageGet("local", TOKEN_STORAGE_KEY) ?? storageGet("session", TOKEN_STORAGE_KEY);
   scrubTokenFromLocation();
+  const storedBase = storageGet("local", API_BASE_STORAGE_KEY);
   return {
-    apiBase: window.location.origin,
+    apiBase: (storedBase && normalizeApiBase(storedBase)) || window.location.origin,
     token: token ?? "",
     platform: "web",
     source: "browser",
+    mode: "remote",
   };
 }
 
@@ -121,6 +173,107 @@ export function getApiConfig(): ApiConfig {
 /** True when running inside the Electron shell. */
 export function isElectron(): boolean {
   return getApiConfig().source === "electron";
+}
+
+/**
+ * Browser session (§12.6): memorise the token (and optionally the server URL when the page
+ * is not served by the backend) after a successful login. In Electron the session is owned
+ * by the main process (config.json); this only updates the in-memory settings.
+ */
+export function setSession(token: string, apiBase?: string | null): void {
+  const current = getApiConfig();
+  const base = apiBase ? normalizeApiBase(apiBase) : null;
+  cachedConfig = { ...current, token, apiBase: base ?? current.apiBase };
+  if (current.source === "browser") {
+    storageSet(TOKEN_STORAGE_KEY, token);
+    storageSet(API_BASE_STORAGE_KEY, base && base !== window.location.origin ? base : null);
+  }
+}
+
+/** Forget the token ("Se déconnecter"). The server URL is kept. */
+export function clearSession(): void {
+  const current = getApiConfig();
+  cachedConfig = { ...current, token: "" };
+  if (current.source === "browser") {
+    storageSet(TOKEN_STORAGE_KEY, null);
+    try {
+      window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** Event dispatched on `window` whenever a request is refused with 401 (LoginGate listens). */
+export const UNAUTHORIZED_EVENT = "wmlab:unauthorized";
+
+/** Result of `probeConnection`. */
+export interface ProbeResult {
+  /** The server answered `/api/health` (public route). */
+  reachable: boolean;
+  version: string | null;
+  /** `GET /api/me` with the token: the user, or null when the token was refused. */
+  me: Me | null;
+  /** Diagnostic (French) when reachable is false or the token was refused. */
+  error: string | null;
+}
+
+async function fetchJson(url: string, token: string | null, timeoutMs: number): Promise<{ status: number; body: unknown }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (token) headers["X-WMLab-Token"] = token;
+    const res = await fetch(url, { headers, signal: ctrl.signal });
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+    return { status: res.status, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Login screen helper: checks that `apiBase` is a Watermark Lab backend (`/api/health`),
+ * then that `token` is accepted (`/api/me`). Never throws. Note: an older backend without
+ * `/api/me` answers 404 — the token is then considered accepted when `/api/health` returned
+ * `workspace` (only sent to an authenticated request).
+ */
+export async function probeConnection(apiBase: string, token: string, timeoutMs = 8000): Promise<ProbeResult> {
+  const base = apiBase.replace(/\/+$/, "");
+  let health: { status: number; body: unknown };
+  try {
+    health = await fetchJson(`${base}/api/health`, token || null, timeoutMs);
+  } catch {
+    return { reachable: false, version: null, me: null, error: `Serveur injoignable : ${base}` };
+  }
+  const hb = health.body as { ok?: unknown; version?: unknown; workspace?: unknown } | null;
+  if (health.status !== 200 || !hb || typeof hb !== "object" || hb.ok !== true) {
+    return { reachable: false, version: null, me: null, error: `${base} ne répond pas comme un backend Watermark Lab (HTTP ${health.status}).` };
+  }
+  const version = typeof hb.version === "string" ? hb.version : null;
+  if (!token) return { reachable: true, version, me: null, error: null };
+  let me: { status: number; body: unknown };
+  try {
+    me = await fetchJson(`${base}/api/me`, token, timeoutMs);
+  } catch {
+    return { reachable: true, version, me: null, error: "Le serveur n'a pas répondu à la vérification du jeton." };
+  }
+  if (me.status === 200 && me.body && typeof me.body === "object" && typeof (me.body as Me).name === "string") {
+    return { reachable: true, version, me: me.body as Me, error: null };
+  }
+  if (me.status === 404 && typeof hb.workspace === "string") {
+    return { reachable: true, version, me: { name: "admin", role: "admin", hosted: false, public_url: null }, error: null };
+  }
+  if (me.status === 401 || me.status === 403 || me.status === 404) {
+    return { reachable: true, version, me: null, error: "Jeton refusé par le serveur. Vérifiez-le ou demandez-en un nouveau à un administrateur." };
+  }
+  return { reachable: true, version, me: null, error: detailFromBody(me.body, statusFallback(me.status)) };
 }
 
 /** Error raised for any failed request; `detail` is the backend message (French when possible). */
@@ -182,7 +335,8 @@ function detailFromBody(body: unknown, fallback: string): string {
 }
 
 function statusFallback(status: number): string {
-  if (status === 401 || status === 403) return "Accès refusé : jeton de session invalide.";
+  if (status === 401) return "Jeton refusé : connectez-vous avec un jeton valide.";
+  if (status === 403) return "Action réservée aux administrateurs.";
   if (status === 404) return "Ressource introuvable.";
   if (status === 409) return "Conflit : l'opération n'est pas possible dans l'état actuel.";
   if (status === 422) return "Requête invalide.";
@@ -228,6 +382,13 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     }
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      try {
+        window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+      } catch {
+        /* no window (tests) */
+      }
+    }
     throw new ApiError(res.status, detailFromBody(data, statusFallback(res.status)));
   }
   return data as T;
@@ -311,6 +472,7 @@ export const api = {
     get<SystemResponse>(`/api/runs/${enc(id)}/system`, { max_points: maxPoints }),
   runLogs: (id: string, tail = 500) => get<LogsResponse>(`/api/runs/${enc(id)}/logs`, { tail }),
   setRunNotes: (id: string, notes: string) => put<OkResponse>(`/api/runs/${enc(id)}/notes`, { notes }),
+  setStudyNotes: (id: string, notes: string) => put<OkResponse>(`/api/studies/${enc(id)}/notes`, { notes }),
   setRunTags: (id: string, tags: string[]) => put<OkResponse>(`/api/runs/${enc(id)}/tags`, { tags }),
   stopRun: (id: string) => post<Job | OkResponse>(`/api/runs/${enc(id)}/stop`),
   fetchCheckpoint: (id: string, name: string) =>
@@ -338,6 +500,12 @@ export const api = {
   saveHosts: (hosts: Host[]) => put<Host[]>("/api/hosts", hosts),
   testHost: (name: string) => post<HostTestResult>(`/api/hosts/${enc(name)}/test`),
   setupHost: (name: string) => post<Job>(`/api/hosts/${enc(name)}/setup`),
+  // §12.4 — inventory, retrieval, decommission, Scaleway instance
+  hostInventory: (name: string, signal?: AbortSignal) => get<HostInventory>(`/api/hosts/${enc(name)}/inventory`, undefined, signal),
+  retrieveHost: (name: string) => post<Job>(`/api/hosts/${enc(name)}/retrieve`),
+  decommissionHost: (name: string, body: DecommissionBody) => post<DecommissionResult>(`/api/hosts/${enc(name)}/decommission`, body),
+  poweroffHost: (name: string) => post<PoweroffResult>(`/api/hosts/${enc(name)}/poweroff`),
+  hostInstance: (name: string, signal?: AbortSignal) => get<HostInstance>(`/api/hosts/${enc(name)}/instance`, undefined, signal),
 
   // Jobs
   listJobs: (status?: string) => get<Job[]>("/api/jobs", { status }),
@@ -350,6 +518,12 @@ export const api = {
   costs: () => get<Costs>("/api/costs"),
   getSettings: () => get<WorkspaceSettings>("/api/settings"),
   saveSettings: (settings: WorkspaceSettings) => put<WorkspaceSettings>("/api/settings", settings),
+
+  // §12 — users & git (hosted mode)
+  me: (signal?: AbortSignal) => get<Me>("/api/me", undefined, signal),
+  listUsers: () => get<UserInfo[]>("/api/users"),
+  git: (signal?: AbortSignal) => get<GitState>("/api/git", undefined, signal),
+  gitPull: () => post<GitState>("/api/git/pull"),
 };
 
 export type Api = typeof api;

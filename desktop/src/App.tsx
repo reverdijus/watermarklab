@@ -4,6 +4,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { CircleAlert, Compass } from "lucide-react";
 import { AppShell } from "./components/layout/AppShell";
 import { LaunchProvider } from "./components/launch/LaunchProvider";
+import { LoginGate } from "./components/LoginGate";
 import { Button, Callout, ConfirmProvider, EmptyState, Page, PageSkeleton, ToastProvider } from "./components/ui";
 import { queryClient } from "./lib/queries";
 import { useThemeSync } from "./lib/theme";
@@ -105,11 +106,13 @@ export default function App() {
       <HashRouter>
         <ToastProvider>
           <ConfirmProvider>
-            <LaunchProvider>
-              <AppShell>
-                <AppRoutes />
-              </AppShell>
-            </LaunchProvider>
+            <LoginGate>
+              <LaunchProvider>
+                <AppShell>
+                  <AppRoutes />
+                </AppShell>
+              </LaunchProvider>
+            </LoginGate>
           </ConfirmProvider>
         </ToastProvider>
       </HashRouter>

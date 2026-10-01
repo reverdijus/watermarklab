@@ -1,0 +1,70 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « ssl_watermark » — projet image-baselines (image, 32 bits) — ÉVALUATION SEULE
+# SSL watermarking (Meta, ICASSP 2022) — poids CC-BY-NC 4.0 : USAGE NON COMMERCIAL —
+# optimisation de l'image dans l'espace latent d'un ResNet-50 DINO, sans réseau d'insertion.
+# Poids officiels : ssl_dino_r50_plus + ssl_normlayer_yfcc
+# Hors dépôt, dans .wmlab/weights/ (une fois par machine) :
+#   .venv/bin/python -m wmlab.cli weights pull ssl_dino_r50_plus ssl_normlayer_yfcc
+# (ou « download: true » ci-dessous : téléchargement automatique au lancement du run).
+# Embedding lent (100 passes avant/arrière d'un ResNet-50 par lot) : quelques minutes sur MPS.
+#
+# phases: [] ⇒ aucun entraînement : validation au step 0, échantillons, checkpoint de référence
+# (les poids ne sont pas recopiés dans le run : sha256 du fichier officiel) puis benchmark.
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/image-baselines/experiments/ssl_watermark.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/image-baselines/experiments/ssl_watermark.yaml --smoke
+# Lancer   : app → « Nouveau lancement » → image-baselines → ssl_watermark → machine « local »
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: ssl_watermark
+description: "SSL watermarking (poids officiels, non commercial) évalué tel quel sur 32 bits"
+hypothesis: >-
+  PSNR ≈ 42 dB (cible) et bit_acc ≥ 0,95 sans attaque (porteuses tirées par QR, pas celles du
+  papier) ; robuste au crop, au redimensionnement, à la rotation 10° et au flou
+  (augmentations pendant l'optimisation), plus fragile au JPEG q50 et au bruit.
+seed: 0
+
+model:
+  name: ssl_watermark
+  params:
+    target_psnr: 42.0                # PSNR visé (officiel)
+    steps: 100                       # itérations d'optimisation par lot (officiel)
+    lr: 0.01                         # Adam sur les pixels
+    lambda_w: 5.0e+4                 # poids de la perte de message
+    lambda_i: 1.0                    # poids de la perte d'image
+    augment: true                    # augmentations aléatoires pendant l'optimisation
+    carrier_seed: 0                  # graine des porteuses = clé secrète
+    download: false
+
+# Données : `train` n'est pas utilisé (aucune phase) mais reste obligatoire dans le format.
+# Synthétique, comme le benchmark image_v1 : chiffres indicatifs (les modèles officiels sont
+# entraînés sur des photos). Pour des chiffres publiables : benchmark image_v2 sur DIV2K.
+data:
+  train:
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 64, seed: 0}
+  val:
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 64, seed: 1}
+  batch_size: 16
+  num_workers: 0
+
+# Pertes : seulement pour val/loss (rien n'est optimisé).
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}
+    img: {name: mse, weight: 100.0}
+
+phases: []                           # évaluation seule : les poids officiels ne bougent pas
+
+eval:
+  val_batches: 4                     # 4 × 16 = les 64 images de validation
+  val_attacks:                       # mêmes attaques de validation que image-hidden/baseline
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+    - {label: crop50, name: crop, params: {area: 0.5}}
+  final_benchmark: {benchmark: image_v1, checkpoints: [last]}
+
+checkpoint: {every_steps: null, keep_last: 1, keep_best: {}, at_phase_end: false}
+samples: {every_steps: null, count: 4}   # original / tatoué / différence ×10 dans l'app
+resources: {device: auto, precision: fp32, compile: false}   # fp32 : comme l'inférence officielle
+tags: [baseline, pretrained, meta]

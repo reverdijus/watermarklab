@@ -1,0 +1,64 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « videoseal » — projet image-baselines (image, 32 bits) — ÉVALUATION SEULE
+# Video Seal 1.0 (Meta, 2024) — MIT — 256 bits natifs, U-Net sur la luminance + JND.
+# Poids officiels : videoseal_1.0
+# Hors dépôt, dans .wmlab/weights/ (une fois par machine) :
+#   .venv/bin/python -m wmlab.cli weights pull videoseal_1.0
+# (ou « download: true » ci-dessous : téléchargement automatique au lancement du run).
+#
+# phases: [] ⇒ aucun entraînement : validation au step 0, échantillons, checkpoint de référence
+# (les poids ne sont pas recopiés dans le run : sha256 du fichier officiel) puis benchmark.
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/image-baselines/experiments/videoseal.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/image-baselines/experiments/videoseal.yaml --smoke
+# Lancer   : app → « Nouveau lancement » → image-baselines → videoseal → machine « local »
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: videoseal
+description: "Video Seal 1.0 avec ses poids officiels, évalué tel quel (aucun entraînement)"
+hypothesis: >-
+  Sans attaque, bit_acc ≈ 1,0 et PSNR ≥ 40 dB (JND : résidu fort dans les textures, faible
+  dans les aplats) ; robuste au JPEG q50/q80, au redimensionnement et à la luminosité (vus à
+  l'entraînement), plus faible sous bruit σ = 0,06 et crop 50 % + JPEG ; bit_acc_mean ≥ 0,85
+  sur image_v1.
+seed: 0
+
+model:
+  name: videoseal
+  params:
+    scaling_w: 0.2                   # amplitude officielle du tatouage
+    jnd: true                        # atténuation perceptuelle (réglage officiel)
+    download: false                  # true : télécharge les poids s'ils manquent
+
+# Données : `train` n'est pas utilisé (aucune phase) mais reste obligatoire dans le format.
+# Synthétique, comme le benchmark image_v1 : chiffres indicatifs (les modèles officiels sont
+# entraînés sur des photos). Pour des chiffres publiables : benchmark image_v2 sur DIV2K.
+data:
+  train:
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 64, seed: 0}
+  val:
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 64, seed: 1}
+  batch_size: 16
+  num_workers: 0
+
+# Pertes : seulement pour val/loss (rien n'est optimisé).
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}
+    img: {name: mse, weight: 100.0}
+
+phases: []                           # évaluation seule : les poids officiels ne bougent pas
+
+eval:
+  val_batches: 4                     # 4 × 16 = les 64 images de validation
+  val_attacks:                       # mêmes attaques de validation que image-hidden/baseline
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+    - {label: crop50, name: crop, params: {area: 0.5}}
+  final_benchmark: {benchmark: image_v1, checkpoints: [last]}
+
+checkpoint: {every_steps: null, keep_last: 1, keep_best: {}, at_phase_end: false}
+samples: {every_steps: null, count: 4}   # original / tatoué / différence ×10 dans l'app
+resources: {device: auto, precision: fp32, compile: false}   # fp32 : comme l'inférence officielle
+tags: [baseline, pretrained, meta]

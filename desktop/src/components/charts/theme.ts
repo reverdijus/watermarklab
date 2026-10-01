@@ -34,7 +34,7 @@ export function readChartTokens(theme: ResolvedTheme): ChartTokens {
     theme,
     text: cssVar("--text") || "#1f1e1d",
     muted: cssVar("--muted") || "#6e6c64",
-    faint: cssVar("--faint") || "#9a978d",
+    faint: cssVar("--faint") || "#75726a",
     border: cssVar("--border") || "#e6e3d9",
     surface: cssVar("--surface") || "#ffffff",
     surface2: cssVar("--surface-2") || "#f5f4ef",

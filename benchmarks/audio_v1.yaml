@@ -1,0 +1,38 @@
+# Benchmark audio v1 — suite d'évaluation FIGÉE (format : ARCHITECTURE.md §5.5)
+#
+# ⚠️  Ne JAMAIS modifier une version publiée : les résultats déjà enregistrés
+#     (eval/<checkpoint>__audio_v1.json) ne seraient plus comparables entre eux.
+#     Pour changer de données, d'attaques ou de métriques : créer benchmarks/audio_v2.yaml
+#     (ex. audio_folder avec root: "@librispeech_clean100" pour la parole,
+#     "@fma_small" pour la musique).
+#
+# Cette v1 tourne sur des données synthétiques (mélanges de sinusoïdes + bruit, seed fixe)
+# en attendant les données réelles. Clips de 1 s à 16 kHz ; attaques à strength = 1.
+# Le résumé bit_acc_mean / tpr@<fpr>_mean moyenne toutes les attaques SAUF identity.
+name: audio_v1
+version: 1
+modality: audio
+description: "Suite audio v1 (synthétique, 64 clips de 1 s à 16 kHz) — ne jamais modifier : créer audio_v2"
+
+data:
+  dataset: synthetic
+  params: {modality: audio, length: 16000, num_items: 64, seed: 1234}
+  preprocess: []
+  limit: 64
+
+batch_size: 16
+seed: 0
+quality_metrics: [snr, si_snr]       # imperceptibilité (original vs tatoué, sans attaque)
+fpr: [1.0e-2, 1.0e-4, 1.0e-6]
+
+attacks:
+  - {label: none, name: identity}
+  - {label: mp3_64k, name: mp3, params: {bitrate_kbps: 64}}          # codec réel (PyAV)
+  - {label: aac_64k, name: aac, params: {bitrate_kbps: 64}}          # codec réel (PyAV)
+  - {label: noise_20db, name: gaussian_noise, params: {snr_db: 20}}
+  - {label: lowpass_3k, name: lowpass, params: {cutoff_hz: 3000}}
+  - {label: highpass_500, name: highpass, params: {cutoff_hz: 500}}
+  - {label: resample_8k, name: resample, params: {rate: 8000}}       # 16 kHz → 8 kHz → 16 kHz
+  - {label: echo_100ms, name: echo, params: {delay_ms: 100, decay: 0.3}}
+  - {label: time_shift_50ms, name: time_shift, params: {max_ms: 50}}
+  - {label: amplitude_m6db, name: amplitude, params: {gain_db: -6}}

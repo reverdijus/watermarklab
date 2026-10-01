@@ -1,0 +1,14 @@
+# Catalogue de datasets — format : ARCHITECTURE.md §5.6
+# Référence dans une spec : {dataset: video_folder, params: {root: "@sav", frames: 16, size: 128}}
+name: sav
+modality: video
+description: >-
+  SA-V (Segment Anything Video, Meta) : ~51 000 vidéos réelles variées (MP4, 24 fps,
+  résolutions d'origine). Données d'entraînement vidéo utilisées par Video Seal.
+  Téléchargement : formulaire sur la page officielle (archives sav_train/sav_000…).
+source: "https://ai.meta.com/datasets/segment-anything-video/"
+license: "CC BY 4.0 (vidéos et annotations)"
+paths:
+  default: "~/datasets/sa-v/sav_train"
+  # Exemple d'hôte Scaleway :
+  # scw-l40s: "/root/datasets/sa-v/sav_train"

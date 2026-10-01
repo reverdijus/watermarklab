@@ -59,7 +59,7 @@ const highlight = HighlightStyle.define([
   { tag: [tags.propertyName, tags.definition(tags.propertyName)], color: "var(--accent)" },
   { tag: [tags.string, tags.special(tags.string)], color: "var(--success)" },
   { tag: [tags.number, tags.bool, tags.null, tags.atom], color: "var(--info)" },
-  { tag: [tags.comment, tags.lineComment, tags.blockComment], color: "var(--faint)", fontStyle: "italic" },
+  { tag: [tags.comment, tags.lineComment, tags.blockComment], color: "var(--muted)", fontStyle: "italic" },
   { tag: [tags.keyword, tags.operator, tags.punctuation, tags.separator], color: "var(--muted)" },
   { tag: [tags.meta, tags.labelName, tags.typeName], color: "var(--warning)" },
   { tag: tags.content, color: "var(--text)" },

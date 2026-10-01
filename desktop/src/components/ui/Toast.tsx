@@ -67,14 +67,22 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     <ToastContext.Provider value={api}>
       {children}
       {createPortal(
-        <div className="pointer-events-none fixed bottom-5 right-5 z-[90] flex w-[360px] max-w-[calc(100vw-40px)] flex-col gap-2">
+        // The container is the live region (present before any toast is added, so that
+        // insertions are announced); errors are assertive.
+        <div
+          role="status"
+          aria-live="polite"
+          aria-relevant="additions"
+          aria-label="Notifications"
+          className="pointer-events-none fixed bottom-5 right-5 z-[90] flex w-[360px] max-w-[calc(100vw-40px)] flex-col gap-2"
+        >
           {items.map((t) => {
             const tone = t.tone ?? "info";
             const Icon = ICONS[tone];
             return (
               <div
                 key={t.id}
-                role={tone === "error" ? "alert" : "status"}
+                role={tone === "error" ? "alert" : undefined}
                 className="no-drag pointer-events-auto flex animate-pop-in items-start gap-3 rounded-xl border border-border bg-surface px-4 py-3 shadow-lg"
               >
                 <Icon size={17} strokeWidth={1.75} className={clsx("mt-0.5 shrink-0", ICON_COLORS[tone])} aria-hidden />

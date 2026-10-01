@@ -1,0 +1,11 @@
+# Watermark Lab — minuterie de sauvegarde quotidienne (03:30, heure du serveur).
+[Unit]
+Description=Watermark Lab — minuterie de sauvegarde (quotidienne, 03:30)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

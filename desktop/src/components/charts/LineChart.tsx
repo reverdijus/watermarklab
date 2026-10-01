@@ -94,7 +94,10 @@ export function LineChart({
     const ax = axisBase(t);
     const fmtY = yFormatter ?? ((v: number) => formatSignificant(v, 3));
     const fmtVal = valueFormatter ?? ((v: number) => fmtY(v));
-    const fmtX = xType === "time" ? (v: number) => formatTime(v, false) : (v: number) => formatInt(v);
+    // Time axis: seconds are needed to tell the ticks apart when the span is under an hour.
+    const xs = xType === "time" ? series.flatMap((s) => s.x).filter((v) => Number.isFinite(v)) : [];
+    const withSeconds = xs.length > 1 && Math.max(...xs) - Math.min(...xs) < 3600 * 1000;
+    const fmtX = xType === "time" ? (v: number) => formatTime(v, withSeconds) : (v: number) => formatInt(v);
     const bands = phases ?? [];
     const phaseAt = (x: number) => bands.find((p) => x >= p.start && x < p.end) ?? (bands.length && x >= bands[bands.length - 1].end ? bands[bands.length - 1] : undefined);
 
@@ -112,6 +115,7 @@ export function LineChart({
       });
       const dashed = s.dashed ?? needsDash(i, t);
       const item: Record<string, unknown> = {
+        id: `line-${i}-${s.name}`,
         type: "line",
         name: s.name,
         data,
@@ -123,7 +127,9 @@ export function LineChart({
         lineStyle: { width: s.width ?? 2, color, type: dashed ? [6, 4] : "solid" },
         itemStyle: { color },
         emphasis: { focus: "series", lineStyle: { width: (s.width ?? 2) + 0.5 } },
-        areaStyle: s.area ? { color: withAlpha(color, 0.1) } : undefined,
+        areaStyle: s.area ? { color: withAlpha(color, 0.1) } : { opacity: 0 },
+        markArea: { data: [] },
+        markLine: { data: [] },
         z: 3,
       };
       if (i === firstWithData && bands.length) {
@@ -173,7 +179,7 @@ export function LineChart({
       grid: {
         left: 8,
         right: 16,
-        top: showLegend ? 34 : 14,
+        top: (showLegend ? 34 : 14) + (yLabel ? 20 : 0),
         bottom: zoom === "slider" ? 44 : xLabel ? 26 : 8,
         containLabel: true,
       },
@@ -219,6 +225,8 @@ export function LineChart({
         logBase: 10,
         name: yLabel,
         nameLocation: "end",
+        nameGap: 12,
+        nameTextStyle: { ...ax.nameTextStyle, align: "left" },
         scale: true,
         min: yMin,
         max: yMax,
@@ -230,6 +238,7 @@ export function LineChart({
           ? []
           : [
               {
+                id: "dz-inside",
                 type: "inside",
                 xAxisIndex: 0,
                 filterMode: "none",
@@ -240,6 +249,7 @@ export function LineChart({
               ...(zoom === "slider"
                 ? [
                     {
+                      id: "dz-slider",
                       type: "slider" as const,
                       xAxisIndex: 0,
                       filterMode: "none" as const,

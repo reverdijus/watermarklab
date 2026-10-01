@@ -90,23 +90,26 @@ export interface StatusBadgeProps {
   className?: string;
   /** Dot only (no label), e.g. in dense lists. */
   dotOnly?: boolean;
+  /** HPO trial stopped by the pruner (`isPrunedTrial`): labelled "Élagué" instead of "Arrêté". */
+  pruned?: boolean;
 }
 
 /** Run/job status with French label; running states get an animated dot. */
-export function StatusBadge({ status, size = "sm", className, dotOnly }: StatusBadgeProps) {
+export function StatusBadge({ status, size = "sm", className, dotOnly, pruned }: StatusBadgeProps) {
   const tone = STATUS_TONES[status] ?? "neutral";
   const live = status === "running" || status === "launching";
+  const label = pruned ? "Élagué" : (STATUS_LABELS[status] ?? status);
   if (dotOnly) {
     return (
-      <span title={STATUS_LABELS[status] ?? status} className={clsx("relative inline-flex h-2 w-2 shrink-0", className)}>
+      <span title={label} className={clsx("relative inline-flex h-2 w-2 shrink-0", className)}>
         {live && <span className={clsx("absolute inset-0 rounded-full animate-pulse-dot", DOT[tone])} />}
         <span className={clsx("relative inline-flex h-2 w-2 rounded-full", DOT[tone])} />
       </span>
     );
   }
   return (
-    <Badge tone={tone} size={size} dot pulse={live} className={className}>
-      {STATUS_LABELS[status] ?? status}
+    <Badge tone={tone} size={size} dot pulse={live} className={className} title={pruned ? "Essai élagué par le pruner de l'étude HPO" : undefined}>
+      {label}
     </Badge>
   );
 }

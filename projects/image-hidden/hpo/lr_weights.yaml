@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Plan HPO « lr_weights » — projet image-hidden · format : ARCHITECTURE.md §5.4
+#
+# Étude MONO-objectif : maximiser la robustesse (val/bit_acc_mean) sous contrainte de qualité
+# (val/psnr). Chaque essai = un run normal de l'expérience de base, avec les valeurs tirées
+# appliquées comme overrides (chemins pointés) + le proxy basse fidélité (`fidelity`).
+#
+# Essai éclair (3 essais, trainer en smoke) :
+#   .venv/bin/python -m wmlab.cli hpo projects/image-hidden/hpo/lr_weights.yaml --smoke
+# Lancer : app → « Nouveau lancement » → Plan HPO, ou sans --smoke en ligne de commande.
+# Méthodologie (hyperparamètres scientifiques / de nuisance, budget) : skill wmlab-experiment,
+# references/hpo-guide.md.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: lr_weights
+experiment: baseline                 # projects/image-hidden/experiments/baseline.yaml
+description: "LR, poids de la perte image (rampe + affinage) et force d'attaque maximale de la baseline"
+hypothesis: >-
+  La baseline est limitée par le compromis LR / poids image : mieux répartir le poids image
+  entre la rampe et l'affinage (et régler le LR) doit gagner ≥ 3 points de bit_acc_mean à PSNR
+  égal.
+
+# TPE (bayésien) : bon choix par défaut en mono-objectif. Les 8 premiers essais sont aléatoires
+# (exploration) avant que le modèle bayésien ne prenne le relais : une étude de moins de
+# 8 essais (ex. l'étude de démo, 5 essais) reste donc un tirage purement aléatoire.
+sampler: {name: tpe, params: {n_startup_trials: 8, multivariate: true}}
+
+# Pruner « median » : à chaque validation après n_warmup_steps, un essai dont la valeur est
+# sous la médiane des essais précédents au même step est coupé (n_startup_trials essais
+# complets d'abord). Pourquoi pas ASHA ici : ASHA ne décide qu'aux paliers
+# min_resource × reduction_factor^k ; avec des essais de 900 steps et min_resource: 300 les
+# paliers sont 300 puis 900 (= validation finale, jamais élaguée) : une seule décision, au
+# step 300, où seul optimizer.lr a agi (les poids image des phases 1-2 et la force d'attaque
+# n'ont encore aucun effet) et où la métrique est mesurée avec un résidu libre (PSNR ~10 dB,
+# contrainte violée par tous). Étude de démo 3e51 : essais 1 et 4 coupés au step 300 à
+# 0,79 / 0,72 alors que l'essai promu (0,81 au step 300) finit à 0,59.
+# n_warmup_steps: 500 (un step < 500 n'est jamais élagué) ⇒ décisions aux validations 600 et
+# 750 (fin de rampe et affinage, là où les 4 paramètres agissent et où la contrainte PSNR
+# peut être satisfaite) ; la validation finale (900) n'est jamais un point d'élagage.
+pruner: {name: median, params: {n_startup_trials: 5, n_warmup_steps: 500}}
+
+objectives:
+  - {metric: val/bit_acc_mean, direction: maximize}
+
+# Contrainte plus souple que celle du projet (38 dB) : les essais basse fidélité (25 % des
+# steps) n'ont pas le temps d'affiner la qualité comme un run complet (repère : la baseline
+# complète atteint ~34 dB sur le Mac). Resserrer quand on passe en pleine fidélité.
+constraints:
+  - {metric: val/psnr, op: ">=", value: 30}
+
+# Espace de recherche : clé = chemin pointé dans l'expérience de base (index de liste numériques).
+# ⚠️ Les phases de la baseline fixent toutes loss_weights.img : modifier loss.terms.img.weight
+# n'aurait AUCUN effet (wmlab validate le refuse). On cherche donc directement dans les phases.
+# Bornes hautes resserrées après l'étude de démo 3e51 : à 989 (affinage) et 264 (fin de rampe)
+# en basse fidélité, le décodeur s'effondre à 0,50 de bit_acc (essais 2 et 3).
+space:
+  optimizer.lr: {type: float, low: 1.0e-4, high: 3.0e-3, log: true}
+  phases.1.loss_weights.img.ramp.1: {type: float, low: 10.0, high: 150.0, log: true}   # fin de rampe (robustness_ramp)
+  phases.2.loss_weights.img: {type: float, low: 30.0, high: 300.0, log: true}          # affinage (finetune_imperceptibility)
+  phases.1.attack_strength.ramp.1: {type: float, low: 0.5, high: 1.0}               # force max de la rampe d'attaques
+
+# Proxy basse fidélité appliqué à CHAQUE essai : 50 % des steps des phases de robustesse et
+# d'affinage (steps_scale réduit aussi les warmup_steps dans la même proportion), validation
+# plus fréquente (le pruner median décide à chaque validation après n_warmup_steps) et pas de
+# benchmark final (on évaluera seulement le meilleur essai, relancé en pleine fidélité).
+# Le warmup de décodage garde sa longueur COMPLÈTE (overrides appliqués après steps_scale) :
+# réduit à 75 steps, le décodeur n'a pas le temps d'accrocher et tous les essais restent à
+# ~0,5 de bit_acc. À 25 % (rampe 225 steps, affinage 75), la rampe n'a pas le temps de
+# remonter le PSNR (~17 dB) et l'affinage à poids fort effondre le décodeur : l'étude ne
+# mesure alors plus rien (mesuré sur le Mac). 50 % = 300 + 450 + 150 = 900 steps par essai
+# (~1,5 min).
+fidelity:
+  steps_scale: 0.5
+  overrides:
+    phases.0.steps: 300              # warmup complet
+    phases.0.lr.warmup_steps: 100    # (le warmup LR de la baseline, non réduit)
+    eval.every_steps: 150            # validations aux steps 150, 300, 450, 600, 750, 900
+    eval.final_benchmark: null
+
+# Limites (la première atteinte arrête l'étude). max_eur n'a d'effet que sur un hôte payant ;
+# parallel = essais simultanés (1 sur le Mac ; 2–4 sur un GPU 48 Go pour de petits modèles).
+budget: {max_trials: 24, max_hours: 3, max_eur: 20, parallel: 1}
+objective_agg: last                  # last = valeur à la fin de l'essai ; best = meilleure valeur vue

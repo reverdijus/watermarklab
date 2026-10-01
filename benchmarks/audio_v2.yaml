@@ -1,0 +1,40 @@
+# Benchmark audio v2 — suite d'évaluation FIGÉE (format : ARCHITECTURE.md §5.5)
+#
+# ⚠️  Ne JAMAIS modifier une version publiée : les résultats déjà enregistrés
+#     (eval/<checkpoint>__audio_v2.json) ne seraient plus comparables entre eux.
+#     Pour changer de données, d'attaques ou de métriques : créer benchmarks/audio_v3.yaml
+#     (ex. audio_folder avec root: "@librispeech_clean100" pour la parole,
+#     "@fma_small" pour la musique).
+#
+# v2 = v1 (mêmes données synthétiques, mêmes attaques) avec des FPR ATTEIGNABLES pour un
+# message de 16 bits : avec 16 bits, P(16/16 bits corrects par hasard) = 2^-16 ≈ 1,5e-5, donc
+# le seuil de détection à FPR 1e-6 exigeait 17 bits corrects sur 16 et tpr@1e-06 valait
+# structurellement 0 (audio_v1). Ici : 1e-2 (14/16 bits), 1e-3 (15/16) et 1e-4 (16/16).
+# Le résumé bit_acc_mean / tpr@<fpr>_mean moyenne toutes les attaques SAUF identity.
+name: audio_v2
+version: 2
+modality: audio
+description: "Suite audio v2 (synthétique, 64 clips de 1 s à 16 kHz, FPR adaptés à 16 bits) — ne jamais modifier : créer audio_v3"
+
+data:
+  dataset: synthetic
+  params: {modality: audio, length: 16000, num_items: 64, seed: 1234}
+  preprocess: []
+  limit: 64
+
+batch_size: 16
+seed: 0
+quality_metrics: [snr, si_snr]       # imperceptibilité (original vs tatoué, sans attaque)
+fpr: [1.0e-2, 1.0e-3, 1.0e-4]        # 2^-16 ≈ 1,5e-5 : 1e-6 serait inatteignable (voir en-tête)
+
+attacks:
+  - {label: none, name: identity}
+  - {label: mp3_64k, name: mp3, params: {bitrate_kbps: 64}}          # codec réel (PyAV)
+  - {label: aac_64k, name: aac, params: {bitrate_kbps: 64}}          # codec réel (PyAV)
+  - {label: noise_20db, name: gaussian_noise, params: {snr_db: 20}}
+  - {label: lowpass_3k, name: lowpass, params: {cutoff_hz: 3000}}
+  - {label: highpass_500, name: highpass, params: {cutoff_hz: 500}}
+  - {label: resample_8k, name: resample, params: {rate: 8000}}       # 16 kHz → 8 kHz → 16 kHz
+  - {label: echo_100ms, name: echo, params: {delay_ms: 100, decay: 0.3}}
+  - {label: time_shift_50ms, name: time_shift, params: {max_ms: 50}}
+  - {label: amplitude_m6db, name: amplitude, params: {gain_db: -6}}

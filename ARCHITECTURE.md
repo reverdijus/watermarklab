@@ -70,8 +70,14 @@ Principes :
     studies/<study_id>/           # études HPO
     index.sqlite                  # index du serveur (reconstructible)
     hosts.yaml                    # machines (local + ssh)
+    hosts_inventory.json          # dernier inventaire par machine (§12.4, cache)
+    users.yaml                    # utilisateurs du mode hébergé (jetons hachés, §12.2 ; mode 0600)
     jobs/<job_id>.json            # un fichier par job lancé par l'app
+    jobs/launch/<job_id>.json     # launch files (copiés dans env/launch.json du run)
+    jobs/logs/<job_id>.log        # sortie des jobs setup / retrieve
+    code/<sha>/                   # exports `git archive` des révisions lancées (§12.3, 10 conservés)
     cache/                        # caches de datasets prétraités
+    weights/<nom>/<fichier>       # poids officiels des baselines pré-entraînées (§4.6, wmlab weights pull)
     logs/server.log
 ```
 
@@ -95,10 +101,12 @@ default_host: local
 | `WMLAB_DATA` | `<workspace>/<data_dir>` | racine des données (runs/, studies/, cache/) |
 | `WMLAB_HOST` | `local` | nom de l'hôte courant (résolution des chemins de datasets, coût) |
 | `WMLAB_PRICE_EUR_PER_HOUR` | `0` | prix de l'hôte courant, écrit dans les manifests |
+| `WMLAB_WEIGHTS` | `<data>/weights` | dossier des poids officiels des baselines pré-entraînées (§4.6) |
 
 `wmlab.paths` expose : `workspace_root() -> Path`, `data_root() -> Path`, `runs_dir() -> Path`,
 `studies_dir() -> Path`, `cache_dir() -> Path`, `current_host() -> str`,
-`current_price() -> float`, `load_workspace_settings() -> WorkspaceSettings`.
+`current_price() -> float`, `weights_dir() -> Path`,
+`load_workspace_settings() -> WorkspaceSettings`.
 
 ### 1.3 Identifiants
 - `run_id` : `YYYYMMDD-HHMMSS-<slug>-<4hex>` (UTC ; slug = nom d'expérience, `[a-z0-9-]`, ≤ 32 car.)
@@ -213,9 +221,36 @@ Helpers : `wmlab.models.load_model_from_checkpoint(path, device="cpu") -> Waterm
 Modèles builtin (noms exacts) :
 | nom | modalité | description |
 |---|---|---|
-| `hidden` | image | encodeur/décodeur conv à la HiDDeN (params: `channels=64`, `enc_blocks=4`, `dec_blocks=7`, `strength=1.0`) |
-| `audio_conv` | audio | encodeur résiduel 1D + détecteur conv 1D façon AudioSeal-lite (params: `channels=32`, `blocks=4`, `strength=1.0`) |
+| `hidden` | image | encodeur/décodeur conv à la HiDDeN (params: `channels=64`, `enc_blocks=4`, `dec_blocks=7`, `strength=1.0`, `grid=4` : grille du pooling adaptatif de l'extracteur, 1 = pooling global seul) |
+| `audio_conv` | audio | encodeur résiduel 1D + détecteur conv 1D façon AudioSeal-lite (params: `channels=32`, `blocks=4`, `strength=1.0`, `segments=8` : segments temporels du pooling adaptatif, 1 = pooling global seul) |
 | `video_framewise` | video | applique un modèle image frame par frame, agrège les logits sur les frames (params: `image_model="hidden"`, `image_params={}`, `aggregate="mean"`) |
+
+**Baselines pré-entraînées** — `wmlab.models.pretrained.PretrainedWatermarkModel(WatermarkModel)` :
+enveloppe d'un modèle publié qui charge ses **poids officiels** dans son constructeur (§4.6) et
+l'adapte au contrat (image `[0,1]` de toute taille, message `{0,1}` du projet, logits).
+```python
+class PretrainedWatermarkModel(WatermarkModel):
+    native_nbits: ClassVar[int]          # longueur du message des poids officiels
+    trainable: ClassVar[bool] = False    # False : baseline figée (phases: [] obligatoire, toujours en eval)
+    def __init__(self, nbits, *, native_nbits=None, fixed_bits: dict[int, int] | None = None, filler_seed=0)
+    def to_native(self, msg) -> Tensor           # [B,nbits] → [B,native] (bits du projet + bourrage fixe)
+    def from_native(self, logits) -> Tensor      # [B,native] → [B,nbits]
+    def weights_file(self, name, *, download=False) -> Path   # fichier déclaré, mémorisé pour la traçabilité
+    def load_official(self, state) -> None       # chargement strict (aucune clé manquante ni en trop)
+    def external_weights(self) -> list[dict]     # [{name, file, url, license, sha256}]
+def load_official_checkpoint(path, *, safe_globals=(), mmap=False)   # torch.load weights_only + liste blanche
+```
+- **Charge utile** : `nbits ≤ native_nbits − len(fixed_bits)`. Les bits du projet occupent les
+  premières positions libres ; les autres reçoivent un bourrage pseudo-aléatoire fixe (graine
+  `filler_seed`, identique pour toutes les images) ignoré au décodage. `fixed_bits` force des
+  positions et les retire de la charge utile.
+- Une baseline figée (`trainable = False`) ne peut pas être entraînée : `wmlab validate` exige
+  `phases: []` ; `plugin-test` ne vérifie pas ses gradients.
+- Plugins livrés (`lab/models/baseline_*.py`, code tiers : `lab/models/THIRD_PARTY_NOTICES.md`) :
+  `videoseal` (256 bits), `pixelseal` (256 bits, **ré-entraînable**), `wam` (32 bits), `trustmark`
+  (100 bits, variantes Q/B/C/P), `invismark` (100 bits dont 6 figés, `uuid_payload`),
+  `ssl_watermark` (nbits libre ≤ 2048, poids CC-BY-NC). TrustMark, InvisMark et SSL exigent
+  torchvision (`uv sync --extra baselines`).
 
 ### 4.2 Attaque — `wmlab.attacks.base.Attack(nn.Module)`
 ```python
@@ -242,10 +277,15 @@ Attaques builtin (noms exacts) :
 - **audio** : `identity`, `gaussian_noise` (`snr_db=20`), `lowpass` (`cutoff_hz=3000`),
   `highpass` (`cutoff_hz=500`), `resample` (`rate=8000`), `amplitude` (`gain_db=-6`),
   `echo` (`delay_ms=100`, `decay=0.3`), `time_shift` (`max_ms=50`), `mp3` (réel via PyAV,
-  non diff., `bitrate_kbps=64`), `aac` (réel, `bitrate_kbps=64`).
+  non diff., `bitrate_kbps=64`), `aac` (réel, `bitrate_kbps=64`). Les attaques audio qui
+  dépendent du temps (`lowpass`, `highpass`, `resample`, `echo`, `time_shift`, `mp3`, `aac`)
+  ont aussi `sample_rate=16000`.
 - **video** : `identity`, `framewise` (`attack="jpeg"`, `params={}` : applique une attaque image à
-  chaque frame), `h264` (réel via PyAV/libx264, non diff., `crf=28`), `frame_drop` (`p=0.2`,
-  remplace par la frame précédente), `temporal_blur` (`weight=0.3`).
+  chaque frame), `h264` (réel via PyAV/libx264, non diff., `crf=28`, `preset="medium"`,
+  `fps=24`), `frame_drop` (`p=0.2`, remplace par la frame précédente), `temporal_blur`
+  (`weight=0.3`).
+- `gaussian_noise` est un seul composant multi-modal (`std` pour l'image, `snr_db` pour
+  l'audio). Les params réels et leurs bornes : `wmlab registry --kind attack --json`.
 
 ### 4.3 Dataset et prétraitements
 - `DATASETS.build(name, **params) -> torch.utils.data.Dataset` renvoyant des items `{"x","id"}`.
@@ -261,18 +301,21 @@ Attaques builtin (noms exacts) :
   preprocess, limit}`. Écrite dans `run.json.datasets`.
 
 Datasets builtin : `synthetic` (`modality`, `size=128` [image/vidéo], `length=16000` [audio],
-`frames=8` [vidéo], `num_items=512`, `seed=0` ; contenu structuré déterministe : formes,
-dégradés, textures / mélanges de sinusoïdes + bruit / formes en mouvement), `image_folder`
-(`root`, `extensions=[".jpg",".jpeg",".png",".webp"]`, `recursive=True`, `limit=None`),
-`audio_folder` (`root`, `sample_rate=16000`, `clip_seconds=1.0`, `limit=None` ; décodage et
-rééchantillonnage via PyAV), `video_folder` (`root`, `frames=16`, `size=128`, `limit=None` ;
-PyAV).
+`frames=8` [vidéo], `num_items=512`, `seed=0`, `sample_rate=16000` [audio] ; contenu
+structuré déterministe : formes, dégradés, textures / mélanges de sinusoïdes + bruit / formes
+en mouvement), `image_folder` (`root`, `extensions=[".jpg",".jpeg",".png",".webp"]`,
+`recursive=True`, `limit=None`), `audio_folder` (`root`, `sample_rate=16000`,
+`clip_seconds=1.0`, `limit=None`, `extensions=[".wav",".flac",".mp3",".ogg",".m4a",".aac",".opus"]`,
+`recursive=True` ; décodage et rééchantillonnage via PyAV), `video_folder` (`root`,
+`frames=16`, `size=128`, `limit=None`, `extensions=[".mp4",".mov",".mkv",".avi",".webm",".m4v"]`,
+`recursive=True` ; PyAV).
 
 Prétraitements builtin : image/vidéo : `resize` (`size`), `center_crop` (`size`),
-`random_crop` (`size`), `random_resized_crop` (`size`, `scale=[0.5,1.0]`), `hflip` (`p=0.5`) ;
-audio : `random_clip` (`seconds`, `sample_rate=16000`), `normalize_peak` (`peak=0.9`),
-`random_gain` (`db=6`) ; vidéo : `temporal_crop` (`frames`). Les ops image s'appliquent
-frame par frame sur la vidéo.
+`random_crop` (`size`), `random_resized_crop` (`size`, `scale=[0.5,1.0]`,
+`ratio=[0.75,1.333]`), `hflip` (`p=0.5`) ; audio : `random_clip` (`seconds`,
+`sample_rate=16000`), `normalize_peak` (`peak=0.9`), `random_gain` (`db=6`) ; vidéo :
+`temporal_crop` (`frames`, `random=True` : début aléatoire, sinon centré). Les ops image
+s'appliquent frame par frame sur la vidéo.
 
 ### 4.4 Pertes — `LOSSES`
 Une perte est une classe `nn.Module` construite avec ses params et appelée avec un `StepBatch` :
@@ -296,6 +339,26 @@ Robustesse (module `wmlab.metrics.robustness`) :
 - `tpr_at_fpr(logits, msg, fpr) -> float`
 
 Métrique de qualité par défaut par modalité : image `psnr`, audio `snr`, vidéo `psnr`.
+
+### 4.6 Poids officiels — `wmlab.weights`
+Les plugins déclarent les fichiers de poids publiés qu'ils chargent ; ces fichiers ne sont
+jamais dans le dépôt : un dossier par hôte, `paths.weights_dir()` (`WMLAB_WEIGHTS`, défaut
+`<data>/weights`), chemin `<weights_dir>/<name>/<filename>`.
+```python
+@dataclass(frozen=True)
+class WeightsFile:
+    name: str; url: str; filename: str; size_mb: float; license: str; source: str
+    sha256: str | None = None; commercial_use: bool = True; description: str = ""
+register_weights(entry) -> WeightsFile           # nom unique (ré-enregistrement identique toléré), URL https
+get_weights(name) -> WeightsFile                 # UnknownComponentError (liste des noms)
+weights_path(name) -> Path                       # sans téléchargement
+require_weights(name, *, download=False) -> Path # absent : FileNotFoundError en français (commande pull)
+pull_weights(name, *, force=False) -> Path       # téléchargement atomique (.part puis rename), sha256 vérifié si connu
+describe_weights() -> list[dict]                 # + available, path, size_mb_on_disk
+weights_info(name, path) -> dict                 # {name, file, url, license, sha256} (checkpoints de référence)
+```
+Un téléchargement n'a lieu que sur demande explicite : `wmlab weights pull NAME…` ou
+`download: true` dans `model.params` d'un modèle pré-entraîné.
 
 ---
 
@@ -389,9 +452,16 @@ checkpoint:
 samples: {every_steps: 2000, count: 4}
 resources: {device: auto, precision: auto, compile: false}
 init_from: null        # {run: <run_id>, checkpoint: "phase_end:robustness_ramp"|"best:<metric>"|"last"|<nom>,
-                       #  start_phase: <nom ou index>, load_optimizer: false}
+                       #  start_phase: <nom ou index>, load_optimizer: false,
+                       #  resume: false}   # true : reprise au step du checkpoint (sans start_phase)
 tags: []
 ```
+
+**Évaluation seule** : `phases: []` (baseline pré-entraînée). Le trainer ne construit pas
+d'optimiseur ; il valide au step 0, écrit le checkpoint `step_000000` (phase `eval`, tag
+`last`), exporte les échantillons et lance `final_benchmark`. Incompatible avec `init_from` ;
+une telle expérience ne peut pas servir de base à un plan HPO. `data.train` reste obligatoire
+(inutilisé).
 
 `PhaseSpec` : `name` (unique), `steps` (>0), `lr` (`LRScheduleSpec`), `loss_weights`
 (dict terme → ScheduledValue ; les termes absents gardent `loss.terms.<t>.weight`),
@@ -437,6 +507,8 @@ space:
   phases.0.steps: {type: int, low: 500, high: 3000, step: 500}
   model.params.channels: {type: categorical, choices: [32, 64]}
 fidelity: {steps_scale: 0.25, overrides: {}}   # proxy basse fidélité appliqué à chaque essai
+                                     # (steps_scale multiplie `steps` ET `lr.warmup_steps` de chaque phase ;
+                                     #  les overrides s'appliquent ensuite)
 budget: {max_trials: 40, max_hours: 12, max_eur: 200, parallel: 2}
 objective_agg: last                  # last | best
 ```
@@ -485,6 +557,8 @@ hosts:
     gpu: "L40S 48GB"
     max_concurrent_jobs: 2
     notes: ""
+    scaleway: {zone: fr-par-2, server_id: "11111111-2222-3333-4444-555555555555"}   # optionnel (§12.4–12.5) ; jamais de clé
+    decommissioned_at: null             # renseigné par POST /api/hosts/{name}/decommission (§12.4)
 ```
 
 ---
@@ -496,7 +570,8 @@ hosts:
   run.json              # manifest (réécrit atomiquement : tmp + rename)
   spec.yaml             # ExperimentSpec entièrement résolue (overrides appliqués)
   metrics.jsonl         # {"t", "step", "phase", "values": {clé: float}}
-  system.jsonl          # {"t", "gpu_util", "gpu_mem_gb", "cpu_percent", "ram_gb", ...} (clés optionnelles)
+  system.jsonl          # {"t", "gpu_util", "gpu_mem_gb", "cpu_percent", "ram_gb", "proc_ram_gb"} — clés optionnelles :
+                        #   gpu_util/gpu_mem_gb via nvidia-smi (CUDA) ; sur MPS : gpu_mem_gb seulement (pas de gpu_util)
   events.jsonl          # {"t", "type", ...} types: status | phase_start | phase_end | checkpoint
                         #   | checkpoint_deleted | eval | sample | note | error | warning
   heartbeat             # epoch float, réécrit toutes les 20 s
@@ -514,9 +589,13 @@ hosts:
     <name>.pt           # name = "step_000123" ; format §6.2
   samples/
     index.jsonl         # {"step", "kind": image|audio|video, "name", "path", "group"}
-    <step>/<idx>_<group>.<png|wav|mp4>
+    <step>/<idx>_<group>.<png|wav|mp4>   # groupes écrits par le trainer : original, watermarked,
+                        #   diff (|x_w − x| × 10, image/vidéo) ou residual ((x_w − x) × 10, audio) ;
+                        #   vidéo : + frame (png de la frame centrale tatouée). Pas de groupe « attaqué ».
   eval/
     <checkpoint>__<benchmark>.json   # EvalResult §6.3
+    <checkpoint>__<benchmark>__smoke.json   # idem avec "smoke": true (eval --smoke ou train --smoke :
+                                            #   8 items, jamais écrasé par / n'écrase pas une évaluation complète, hors classement)
 ```
 
 ### 6.1 `run.json`
@@ -542,8 +621,14 @@ hosts:
 }
 ```
 - `status` ∈ `queued|running|completed|failed|killed`. Le statut dérivé `lost` est calculé par
-  les lecteurs : `running` et heartbeat plus vieux que 600 s.
-- `parent` : `{"run_id", "checkpoint", "start_phase"}` pour un run branché (`init_from`).
+  les lecteurs : `running` et heartbeat plus vieux que 600 s. Pour un run lancé par l'app dont le
+  process a disparu sans écrire de statut final, le `JobManager` écrit lui-même `status`
+  (`lost`, ou `failed`/`killed` selon l'issue du job), `ended_at` (dernier heartbeat) et `error`.
+- `pid`, `proc_start` : pid du process qui a écrit le run et son heure de création (psutil,
+  `null` sans psutil) ; `POST /api/runs/{id}/stop` n'envoie SIGTERM qu'à ce process (même
+  hôte, même heure de création, ligne de commande `wmlab`), jamais à un autre.
+- `parent` : `{"run_id", "checkpoint", "start_phase", "selector", "resume"}` pour un run branché
+  ou repris (`init_from`).
 - `params` : aplatissement pointé des scalaires de `model`, `optimizer`, `data.batch_size`,
   `loss.terms.*.weight`, `phases.*.steps`, `seed`, plus toutes les clés d'override.
 - `summary` : dernière valeur de chaque métrique `val/*` + `best/<clé>` pour les clés de
@@ -562,6 +647,13 @@ hosts:
 Tags : `last`, `best:<metric>`, `phase_end:<phase>`. Rétention : on garde les `keep_last`
 derniers, le meilleur pour chaque `keep_best`, tous les `phase_end:*` ; les autres fichiers sont
 supprimés (événement `checkpoint_deleted`).
+**Checkpoint de référence** (évaluation seule d'un modèle pré-entraîné) : `"model": {}` et
+`"external_weights": [{name, file, url, license, sha256}]` — les poids officiels ne sont pas
+recopiés dans le run ; au rechargement (`load_model_from_checkpoint`, `init_from`, benchmark),
+le modèle est reconstruit depuis `model_name`/`model_params` (ce qui charge les poids
+officiels) après vérification des sha256 (`wmlab.models.load_checkpoint_weights`). Tout
+modèle pré-entraîné porte aussi `external_weights` dans ses checkpoints d'entraînement.
+
 Sélecteurs acceptés partout (CLI, init_from, API) : `last`, `best:<metric>`, `phase_end:<phase>`,
 ou un nom exact. Fonction : `wmlab.tracking.resolve_checkpoint(run_dir, selector) -> dict`.
 
@@ -577,16 +669,28 @@ ou un nom exact. Fonction : `wmlab.tracking.resolve_checkpoint(run_dir, selector
 }
 ```
 `bit_acc_mean` / `tpr@<fpr>_mean` = moyenne sur les attaques **hors** `identity`.
-Clé TPR : `f"tpr@{fpr:g}"` (ex. `tpr@0.01`, `tpr@0.0001`, `tpr@1e-06`).
+Clé TPR : `f"tpr@{fpr:g}"` (ex. `tpr@0.01`, `tpr@0.0001`, `tpr@1e-06`). Un FPR inatteignable
+avec `nbits` bits (`fpr < 2**-nbits` : même `nbits/nbits` bits corrects dépassent ce FPR) n'est
+pas écrit (clé absente, pas un 0) ; `wmlab validate` refuse un tel benchmark comme
+`default_benchmark` / `final_benchmark` d'un projet. `"in_run": true` marque le benchmark
+final écrit par le trainer (temps GPU déjà compris dans la durée du run : non facturé à part ;
+les évaluations des essais d'une étude ne le sont pas non plus). Une évaluation
+`--smoke` porte en plus `"smoke": true` (fichier `…__smoke.json`, ignorée par le classement).
 
 ### 6.4 Dossier d'étude HPO `<data>/studies/<study_id>/`
 ```
-study.json      # {format_version, kind: "hpo", study_id, project, plan, experiment, spec_path, status,
-                #  created_at, started_at, ended_at, host, price_eur_per_hour, objectives: [{metric, direction}],
-                #  budget: {...}, n_trials, best: [{trial, values, params, run_id}], error}
+study.json      # {format_version, kind: "hpo", study_id, project, plan, experiment, spec_path, experiment_path,
+                #  modality, status, created_at, started_at, ended_at, host, price_eur_per_hour, device, smoke,
+                #  overrides (--set), objectives: [{metric, direction}], objective_agg, budget: {...},
+                #  n_trials, n_complete, n_pruned, n_failed, n_running,
+                #  best: [{trial, values, params, run_id}] (essais COMPLETE seulement), error}
 spec.yaml       # HpoSpec résolue
 optuna.journal  # optuna JournalStorage(JournalFileBackend) — source de vérité des essais
-trials.jsonl    # {"number", "state", "params", "values", "intermediate": [[step, v]], "run_id", "duration_s", "t"}
+trials.jsonl    # {"number", "state": RUNNING|COMPLETE|PRUNED|FAIL, "params", "values", "intermediate": [[step, v]],
+                #  "constraints": [float] | null, "feasible": bool | null, "run_id", "duration_s", "t"}
+                #  (append-only : un essai a une ligne RUNNING puis une ligne finale ; StudyReader.trials()
+                #  garde la dernière ligne de chaque numéro)
+notes.md        # hypothèse (pré-remplie depuis le plan) + observations + conclusion de l'étude
 events.jsonl  heartbeat  stdout.log
 ```
 Chaque essai est un run normal (`runs/<run_id>` avec `study`, `trial`, `gpu_share = 1/parallel`).
@@ -595,11 +699,13 @@ Le coût d'une étude est porté par `study.json` ; les runs d'essai sont exclus
 ### 6.5 Métriques : clés normalisées
 - Entraînement : `train/loss`, `train/loss/<term>`, `train/bit_acc`, `train/lr`,
   `train/weight/<term>`, `train/attack_strength`, `train/step_time_s`, `train/data_wait_frac`,
-  `train/items_per_s`.
+  `train/items_per_s`, `train/grad_norm` (norme du gradient avant clipping ; présente si
+  `optimizer.grad_clip` est défini).
 - Validation : `val/loss`, `val/<quality_metric>` (ex. `val/psnr`, `val/ssim`, `val/snr`),
   `val/bit_acc` (sans attaque), `val/bit_acc/<attack_label>`, `val/bit_acc_mean` (moyenne des
   attaques de `eval.val_attacks`).
-- Système : clés libres de `system.jsonl` (`gpu_util`, `gpu_mem_gb`, `cpu_percent`, `ram_gb`).
+- Système : clés libres de `system.jsonl` (`gpu_util`, `gpu_mem_gb`, `cpu_percent`, `ram_gb`,
+  `proc_ram_gb`) ; `gpu_util` n'existe qu'avec `nvidia-smi` (absent sur Mac/MPS).
 
 ---
 
@@ -622,6 +728,7 @@ class Run:
     def set_progress(self, **progress) -> None           # throttle l'écriture du manifest (≤ 1/10 s)
     def update_summary(self, values: dict[str, float]) -> None
     def set_datasets(self, versions: dict[str, str]) -> None
+    def set_tags(self, tags: list[str]) -> None            # remplace run.json.tags (manifest réécrit)
     def set_checkpoint_policy(self, keep_last: int, keep_best: dict[str, str], keep_phase_end: bool = True) -> None
     def save_checkpoint(self, state: dict, *, step: int, phase: str, metrics: dict | None = None,
                         tags: list[str] | None = None) -> str       # renvoie le nom
@@ -648,7 +755,20 @@ class RunReader:
     def spec_yaml(self) -> str
     def env(self) -> dict                 # {"git", "git_diff", "hardware", "pip_freeze_lines", "command", "launch"}
 
-def list_runs(runs_dir: Path) -> list[Path]
+class StudyReader:                     # lecture seule d'un dossier d'étude §6.4
+    def __init__(self, study_dir: Path)
+    dir: Path; study_id: str
+    def exists(self) -> bool
+    def manifest(self, now: float | None = None) -> dict   # study.json + "status" dérivé (lost), "heartbeat", "duration_s", "cost_eur"
+    def raw_manifest(self) -> dict
+    def trials(self) -> list[dict]        # dernière ligne de trials.jsonl par numéro d'essai, triées
+    def events(self, limit: int | None = None) -> list[dict]
+    def logs(self, tail: int = 500) -> list[str]
+    def spec_yaml(self) -> str
+    def spec(self) -> dict
+
+def list_runs(runs_dir: Path) -> list[Path]            # dossiers contenant run.json, plus récents d'abord
+def list_studies(studies_dir: Path) -> list[Path]      # dossiers contenant study.json, plus récents d'abord
 def cost_eur(manifest: dict, now: float | None = None) -> float
 def resolve_checkpoint(run_dir: Path, selector: str) -> dict       # entrée d'index + "path" absolu
 def read_jsonl(path: Path) -> list[dict]      # tolère une dernière ligne partielle
@@ -672,8 +792,12 @@ def train_from_spec(spec_path: str | Path, *, overrides: dict[str, str] | None =
 Boucle : `PhasePlan` → pour chaque step : phase courante, lr = base × `lr_factor`, poids des
 pertes résolus, tirage d'attaque + force, `x_w = model.embed(x, msg)`,
 `x_att = apply_attack(att, x_w, s)`, `logits = model.extract(x_att)`, pertes pondérées +
-`aux_losses`, backward, clip, step. Logs `train/*` toutes les 20 steps. Validation toutes
-`eval.every_steps` et en fin de phase. Checkpoints (`every_steps`, fin de phase, final).
+`aux_losses`, backward, clip, step (précision `fp16` : `torch.amp.GradScaler`). Logs `train/*`
+toutes les 20 steps. Validation toutes `eval.every_steps` et en fin de phase, messages et
+tirages d'attaque seedés (`seed + 1`) dans un état RNG forké : chaque validation voit les mêmes
+tirages ; `val/bit_acc_mean` exclut `identity`. Checkpoints (`every_steps`, fin de phase,
+final, et à chaque validation qui améliore une métrique de `keep_best` : un checkpoint ne porte
+que les métriques mesurées à son propre step, `best:<m>` désigne donc les poids mesurés).
 Échantillons. `final_benchmark` à la fin. `trial_callback(step, val_metrics)` appelé après chaque
 validation (pour le pruning Optuna ; peut lever `optuna.TrialPruned`).
 - `smoke=True` : données remplacées par `synthetic` de même modalité (image 64 px, audio 8000
@@ -681,13 +805,19 @@ validation (pour le pruning Optuna ; peut lever `optuna.TrialPruned`).
   validation toutes les 4 steps sur 2 batches, benchmark final limité à 8 items.
 - `max_hours` : watchdog ⇒ checkpoint `last` puis `finish("killed", "max_hours reached")`.
 - Device `auto` : cuda > mps > cpu. Précision `auto` : bf16 autocast sur CUDA, fp32 sinon.
+- `phases: []` (évaluation seule, §5.3) : `Trainer.evaluate_only()` — validation au step 0,
+  checkpoint (de référence pour un modèle pré-entraîné), échantillons, `final_benchmark`.
 - `init_from` : charge les poids (et optionnellement l'optimiseur) depuis
   `<runs>/<run>/checkpoints/…` ; démarre à `start_phase` (step global = somme des phases
-  précédentes) ; `run.json.parent` renseigné.
+  précédentes ; avertissement si le checkpoint n'est pas à ce step) ; `run.json.parent`
+  renseigné. `resume: true` (incompatible avec `start_phase`) reprend au step du checkpoint
+  (phase localisée dans le plan, optimiseur chargé, RNG re-seedés à `seed + 1000003 × step`).
 
 ### 8.2 Évaluation — `wmlab.eval.benchmark`
 ```python
-def run_benchmark(model, bench: BenchmarkSpec, *, device, nbits, limit: int | None = None) -> dict  # EvalResult sans ids
+def run_benchmark(model, bench: BenchmarkSpec, *, device, nbits, limit: int | None = None,
+                  sample_rate: int | None = None, fps: int | None = None) -> dict  # EvalResult sans ids
+                  # sample_rate / fps : contexte passé aux attaques et métriques (audio / vidéo)
 def evaluate_checkpoint(run_id_or_dir: str, checkpoint: str, benchmark: str, *,
                         device: str | None = None, smoke: bool = False) -> dict   # écrit eval/…json + event
 ```
@@ -695,7 +825,10 @@ def evaluate_checkpoint(run_id_or_dir: str, checkpoint: str, benchmark: str, *,
 ### 8.3 HPO — `wmlab.hpo.driver`
 ```python
 def run_study(hpo_spec_path: str | Path, *, study_id: str | None = None, smoke: bool = False,
-              device: str | None = None, launch_file: str | None = None) -> dict
+              device: str | None = None, launch_file: str | None = None,
+              overrides: dict[str, str] | None = None,     # wmlab hpo --set : appliqués à l'expérience de base de chaque essai
+              max_hours: float | None = None,              # plafonne budget.max_hours
+              max_trials: int | None = None) -> dict       # plafonne budget.max_trials
 def run_worker(study_dir: str | Path, *, worker_index: int, device: str | None = None) -> None
 ```
 Le driver crée le dossier d'étude, puis lance `budget.parallel` workers (sous-process
@@ -704,34 +837,52 @@ Le driver crée le dossier d'étude, puis lance `budget.parallel` workers (sous-
 et `max_eur/price` via callback de temps). Objectif : lance `train_from_spec` en processus avec
 les overrides tirés + `fidelity`, `trial_callback` pour `trial.report/should_prune` (mono-objectif
 uniquement). Contraintes via `constraints_func` (attribut utilisateur `constraints`).
-`smoke=True` : 3 essais, parallel 1, trainer en smoke.
+`smoke=True` : 3 essais, parallel 1, trainer en smoke. La validation finale d'un essai n'est
+jamais un point d'élagage (`trial.should_prune()` n'est consulté que si `step < total_steps`) :
+un essai entraîné jusqu'au bout est COMPLETE.
 
 ### 8.4 CLI — `wmlab.cli` (Typer ; point d'entrée `main()`)
 ```
 wmlab server   [--port 8765] [--token TOKEN] [--host 127.0.0.1] [--workspace PATH] [--no-sync]
 wmlab train    SPEC [--set k=v]... [--run-id ID] [--smoke] [--device D] [--max-hours H] [--launch-file F]
-wmlab hpo      SPEC [--study-id ID] [--smoke] [--device D] [--launch-file F]
+wmlab hpo      SPEC [--set k=v]... [--study-id ID] [--smoke] [--device D] [--max-hours H] [--max-trials N] [--launch-file F]
+                                  # --set : expérience de base de chaque essai ; --max-hours / --max-trials plafonnent budget.*
 wmlab hpo-worker STUDY_DIR --worker-index N [--device D]
 wmlab eval     --run RUN --checkpoint SEL --benchmark NAME [--device D] [--smoke]
-wmlab validate [PATH]...          # sans argument : tout le workspace ; code retour ≠ 0 si erreur
+wmlab validate [PATH]... [--json] # sans argument : tout le workspace, import des plugins compris ; code retour ≠ 0 si erreur
 wmlab registry [--kind K] [--json]
-wmlab plugin-test KIND NAME [--modality M]     # vérifie un plugin (formes, plages, gradients)
-wmlab new project NAME --modality M [--bits 48]
+wmlab plugin-test KIND NAME [--modality M] [--param k=v]... [--json]   # vérifie un plugin (formes, plages, gradients ; pas de gradients pour une baseline figée)
+wmlab new project NAME --modality M [--bits 48] [--title T] [--description D]
 wmlab new experiment PROJECT NAME [--from EXPERIMENT]
-wmlab new plugin KIND NAME --modality M        # génère un squelette dans lab/<kind>s/
+wmlab new plugin KIND NAME --modality M        # squelette dans lab/<kind>s/ ; M : image|audio|video|image,video ; all (preprocess/loss/metric)
 wmlab new hpo PROJECT NAME --experiment EXP
-wmlab runs list [--project P] [--status S] [--json]
-wmlab runs show RUN [--json]      # manifest + summary + checkpoints + evals (pour l'analyse)
+wmlab runs list [--project P] [--status S] [--include-trials] [--limit 100] [--json]   # runs d'essais HPO exclus sans --include-trials
+wmlab runs show RUN [--json]      # manifest + summary + checkpoints + evals (pour l'analyse) ; RUN = id, fragment unique ou dossier
 wmlab index                       # reconstruit l'index SQLite
+wmlab users add NAME [--role member]   # mode hébergé (§12.2) : crée un utilisateur, affiche son jeton wml_… UNE fois ; --role admin|member
+wmlab users list [--json]              # utilisateurs actifs et révoqués (.wmlab/users.yaml, jamais les jetons)
+wmlab users revoke NAME                # révoque le jeton (l'entrée reste pour l'historique)
+wmlab weights list [--json]            # poids officiels déclarés : source, licence, présence locale (§4.6)
+wmlab weights pull NAME... [--force]   # télécharge des poids officiels dans weights_dir()
 ```
 
 ---
 
 ## 9. API HTTP (backend FastAPI, `wmlab.server`)
 
-- Écoute `127.0.0.1` uniquement. Chaque requête `/api/*` exige l'en-tête `X-WMLab-Token`
-  (ou `?token=` pour les fichiers média). CORS : toutes origines (le token protège).
-- `GET /` sert le build du frontend (`desktop/dist`) s'il existe (usage navigateur).
+- Écoute `127.0.0.1` uniquement. Chaque requête `/api/*` exige le jeton, dans l'en-tête
+  `X-WMLab-Token` ou, à défaut, en paramètre `?token=` (accepté sur toutes les routes ; utilisé
+  par le frontend pour les fichiers média). Exception : `GET /api/health` est public (sans
+  jeton ; sert à la sonde de démarrage de l'app) mais ne renvoie `workspace` qu'avec un jeton
+  valide. `OPTIONS` (préflight CORS) est libre. CORS : toutes origines (le token protège) —
+  uniquement quand un jeton est défini. Le serveur a toujours un jeton : `--token`, sinon
+  `WMLAB_TOKEN`, sinon un jeton aléatoire généré et affiché une fois sur stderr ; hors loopback
+  (`--host`), un jeton explicite est obligatoire. Comparaison en bytes (jeton non ASCII ⇒ 401).
+- `GET /` sert le build du frontend (`desktop/dist`) s'il existe (usage navigateur) ;
+  `index.html` est servi en `Cache-Control: no-cache` (un rebuild n'est jamais masqué par le
+  cache), les `assets/` hachés en `immutable`.
+- Réponses compressées (gzip) au-delà de 1 ko quand le client l'accepte (`Accept-Encoding`) :
+  le détail d'un run (`git_diff`, `spec_yaml`, `events`) atteint plusieurs centaines de ko.
 - Erreurs : statut 4xx/5xx + `{"detail": str}`.
 - Toutes les réponses sont du JSON en `snake_case`. Types ci-dessous en TypeScript.
 
@@ -774,9 +925,10 @@ interface RunSummary {
   run_id: string; project: string; experiment: string; modality: Modality; status: RunStatus;
   host: string; created_at: string; started_at: string | null; ended_at: string | null;
   duration_s: number | null; cost_eur: number; study: string | null; trial: number | null;
-  parent: { run_id: string; checkpoint: string; start_phase?: string | number | null } | null;
+  parent: { run_id: string; checkpoint: string; start_phase?: string | number | null; resume?: true } | null;
   tags: string[]; progress: Progress | null; summary: Record<string, number>;
   params: Record<string, string | number | boolean | null>; error: string | null;
+  user: string | null;                        // membre ayant lancé le run via l'app (§12.2)
 }
 interface Checkpoint {
   name: string; step: number; phase: string; metrics: Record<string, number>; tags: string[];
@@ -810,10 +962,12 @@ interface StudySummary {
   n_failed: number; n_running: number; objectives: Objective[];
   best: { trial: number; values: number[]; params: Record<string, unknown>; run_id: string | null }[];
   cost_eur: number; budget: { max_trials: number | null; max_hours: number | null; max_eur: number | null; parallel: number };
+  user: string | null;
 }
 interface StudyDetail extends StudySummary {
   spec: Record<string, unknown>; trials: Trial[]; importances: Record<string, number> | null;
   pareto: number[];                       // numéros d'essais sur le front
+  notes: string;                          // <study>/notes.md
 }
 interface LeaderRow {
   run_id: string; project: string; experiment: string; checkpoint: string | null; benchmark: string | null;
@@ -843,13 +997,42 @@ interface Host {
   name: string; kind: "local" | "ssh"; ssh_target?: string | null; workdir?: string | null;
   data_dir?: string | null; python?: string | null; price_eur_per_hour: number; gpu?: string | null;
   max_concurrent_jobs: number; notes?: string | null;
+  scaleway: { zone: string; server_id: string } | null;   // §12.4 (hosts.yaml)
+  decommissioned_at: string | null;                       // §12.4 (hosts.yaml)
+  unretrieved_checkpoints: number | null;                 // dernier inventaire (null : jamais calculé / injoignable)
+  unretrieved_bytes: number | null; inventory_at: string | null;
+  active_jobs: number;                                    // jobs queued|launching|running sur la machine (calculé)
 }
+interface Retrieval { status: "complete" | "partial" | "failed" | "n/a"; checkpoints: number; bytes: number; missing: string[] }
+interface RetrieveResult { runs: number; studies: number; checkpoints: number; bytes: number; missing: string[] }
 interface Job {
-  job_id: string; kind: "train" | "hpo" | "eval" | "setup"; host: string; target: string;
+  job_id: string; kind: "train" | "hpo" | "eval" | "setup" | "retrieve"; host: string; target: string;
   overrides: Record<string, string>; status: JobStatus; run_id: string | null; study_id: string | null;
   created_at: string; started_at: string | null; ended_at: string | null; max_hours: number | null;
   smoke: boolean; error: string | null; pid: number | null; last_sync_at: string | null;
+  user: string | null;                        // §12.2
+  git_ref: string | null; git_sha: string | null;   // §12.3 (git_ref null : copie de travail synchronisée, git_sha = HEAD informatif)
+  retrieval: Retrieval | null;                // §12.4 : sync complète de fin de job (train/hpo/eval sur ssh)
+  result: RetrieveResult | null;              // jobs `retrieve` (mis à jour pendant le rapatriement)
 }
+interface Me { name: string; role: "admin" | "member"; hosted: boolean; public_url: string | null }
+interface UserInfo { name: string; role: "admin" | "member"; created_at: string; revoked_at: string | null }
+interface GitState {
+  available: boolean; hosted: boolean; branch: string | null; sha: string | null; short_sha: string | null;
+  dirty: boolean; remote: string | null; ahead: number | null; behind: number | null;
+  last_pull_at: string | null; last_pull_error: string | null;
+}
+interface FileGit { committed: string | null; pushed: boolean; error: string | null }
+interface HostInventory {
+  host: string; reachable: boolean; error: string | null; checked_at: string; active_jobs: number;
+  remote_data_dir: string | null;
+  runs: { run_id: string; project: string | null; status: string | null; checkpoints_total: number;
+          checkpoints_local: number; bytes_remote: number; bytes_missing: number; indexed: boolean }[];
+  studies: { study_id: string; trials: number; synced: boolean }[];
+  unretrieved_checkpoints: number; unretrieved_bytes: number; unindexed_runs: number;
+}
+interface InstanceInfo { configured: boolean; state: string | null; commercial_type: string | null; zone: string | null; error: string | null }
+interface DecommissionResult { ok: true; deleted_instance: boolean; instance_state: string | null; message: string }
 interface CostItem { kind: "run" | "study" | "eval" | "manual"; id: string; project: string | null;
   host: string | null; started_at: string | null; hours: number; eur: number; label?: string }
 interface Costs {
@@ -860,10 +1043,12 @@ interface Costs {
   items: CostItem[];
   budget: { total_eur: number; start: string | null; end: string | null };
 }
+interface HostedSettings { enabled: boolean; git_branch: string; auto_pull_s: number; auto_commit: boolean; public_url: string | null }
 interface WorkspaceSettings {
   name: string; budget: { total_eur: number; start: string | null; end: string | null;
     manual_entries: { label: string; eur: number; date: string; project: string | null }[] };
   data_dir: string; sync_interval_s: number; default_host: string;
+  hosted: HostedSettings;                     // §12.1
 }
 interface Overview {
   workspace: { name: string; path: string };
@@ -875,7 +1060,11 @@ interface Overview {
 
 | Méthode | Route | Réponse |
 |---|---|---|
-| GET | `/api/health` | `{ok: true, version, workspace}` |
+| GET | `/api/health` | `{ok: true, version, workspace?}` — **public** (sans jeton ; `workspace` seulement avec jeton) |
+| GET | `/api/me` | `Me` (utilisateur du jeton : `admin` implicite pour le jeton serveur, §12.2) |
+| GET | `/api/users` | `UserInfo[]` (**admin**) |
+| GET | `/api/git` | `GitState` (§12.3) |
+| POST | `/api/git/pull` | `GitState` (pull `--ff-only` immédiat ; 400 sans dépôt, 409 arbre sale ou pull impossible) |
 | GET | `/api/overview` | `Overview` |
 | GET | `/api/projects` | `ProjectSummary[]` |
 | POST | `/api/projects` body `{name, title, modality, message_bits, description}` | `ProjectSummary` |
@@ -883,7 +1072,7 @@ interface Overview {
 | POST | `/api/projects/{name}/experiments` body `{name, from?: string}` | `{path}` |
 | POST | `/api/projects/{name}/hpo` body `{name, experiment}` | `{path}` |
 | GET | `/api/files?path=` | `{path, content, kind, validation: {valid, errors}}` |
-| PUT | `/api/files` body `{path, content}` | `{saved: true, validation}` (uniquement sous `projects/`, `benchmarks/`, `datasets/`, `lab/` ; anti path traversal) |
+| PUT | `/api/files` body `{path, content}` | `{saved: true, validation, git: FileGit \| null}` (uniquement sous `projects/`, `benchmarks/`, `datasets/`, `lab/` ; anti path traversal, insensible à la casse ; 409 pour un `benchmarks/<nom>.yaml` existant utilisé par une évaluation enregistrée : nouvelle version seulement ; `git` renseigné en mode hébergé avec `auto_commit` dans un dépôt git, sinon `null`, §12.3) |
 | POST | `/api/validate` body `{content, kind?, path?}` | `{valid, errors, plan: PhasePlanPreview \| null}` |
 | GET | `/api/registry` | `{entries: Record<kind, RegistryEntry[]>, errors: {module, error}[]}` |
 | GET | `/api/runs?project=&experiment=&status=&study=&host=&include_trials=false&limit=500` | `RunSummary[]` (plus récents d'abord) |
@@ -899,20 +1088,26 @@ interface Overview {
 | GET | `/api/compare?runs=a,b&keys=k1,k2&max_points=500` | `{runs: RunSummary[], series: Record<run_id, Record<key, Series>>}` |
 | GET | `/api/studies?project=` | `StudySummary[]` |
 | GET | `/api/studies/{id}` | `StudyDetail` |
+| PUT | `/api/studies/{id}/notes` body `{notes}` | `{ok: true}` |
 | GET | `/api/leaderboard?project=&benchmark=&source=benchmark\|val` | `Leaderboard` |
 | GET | `/api/benchmarks` | `BenchmarkInfo[]` |
 | GET | `/api/datasets` | `DatasetInfo[]` |
-| GET/PUT | `/api/hosts` | `Host[]` (PUT reçoit `Host[]`) |
+| GET/PUT | `/api/hosts` | `Host[]` (PUT reçoit `Host[]`, **admin** ; les champs calculés `unretrieved_*`, `inventory_at`, `active_jobs` sont ignorés à l'écriture) |
 | POST | `/api/hosts/{name}/test` | `{ok, latency_ms, output, error}` |
-| POST | `/api/hosts/{name}/setup` | `Job` |
+| POST | `/api/hosts/{name}/setup` | `Job` (400 pour une machine retirée) |
+| GET | `/api/hosts/{name}/inventory` | `HostInventory` (recalculé à chaque appel, mis en cache dans `.wmlab/hosts_inventory.json`, §12.4) |
+| POST | `/api/hosts/{name}/retrieve` | `Job` de `kind: "retrieve"` (400 machine locale ; 409 si un rapatriement de la machine est déjà actif) |
+| POST | `/api/hosts/{name}/decommission` body `{confirm: true, delete_instance?: boolean, force?: boolean}` | `DecommissionResult` (**admin** ; 400 sans `confirm` ou machine locale ; 409 job actif, checkpoints/runs non rapatriés, machine injoignable sans `force`, déjà retirée ; 502 erreur API Scaleway, machine non retirée) |
+| POST | `/api/hosts/{name}/poweroff` | `{ok: true, instance_state}` (**admin** ; 409 job actif ; 400 sans `scaleway` ou sans `SCW_SECRET_KEY` ; 502 erreur API) |
+| GET | `/api/hosts/{name}/instance` | `InstanceInfo` (jamais d'exception) |
 | GET | `/api/jobs?status=` | `Job[]` |
-| POST | `/api/jobs` body `{kind, host, spec_path?, run_id?, checkpoint?, benchmark?, overrides?, max_hours?, smoke?, init_from?: {run, checkpoint, start_phase}}` | `Job` |
+| POST | `/api/jobs` body `{kind, host, spec_path?, run_id?, checkpoint?, benchmark?, overrides?, max_hours?, smoke?, init_from?: {run, checkpoint, start_phase, resume?}, git_ref?}` | `Job` (`git_ref` : §12.3 ; 400 révision inconnue, machine locale ≠ HEAD, ou machine retirée) |
 | POST | `/api/jobs/estimate` body `{spec_path, host, overrides?}` | `{total_steps, est_hours: number \| null, est_eur: number \| null, basis: string}` |
 | POST | `/api/jobs/{id}/cancel` | `Job` |
 | POST | `/api/jobs/{id}/sync` | `Job` |
 | GET | `/api/costs` | `Costs` |
 | GET | `/api/costs.csv` | CSV (séparateur `;`, en-têtes FR) |
-| GET/PUT | `/api/settings` | `WorkspaceSettings` |
+| GET/PUT | `/api/settings` | `WorkspaceSettings` (PUT : **admin** ; en mode hébergé avec `auto_commit`, `workspace.yaml` est commité et poussé, §12.3) |
 
 ### 9.1 Serveur : organisation interne
 - `wmlab/server/app.py` : `create_app(workspace: Path, token: str | None, sync: bool = True) -> FastAPI`
@@ -932,10 +1127,20 @@ interface Overview {
     `.venv`, `.wmlab`, `desktop`, `node_modules`, `__pycache__`), écriture du launch file,
     lancement détaché `nohup setsid … & echo $!`, annulation `kill -TERM -<pgid>`,
     sync descendante `rsync -az --exclude 'checkpoints/*.pt'` des dossiers de runs/études vers
-    `.wmlab/runs|studies/`. Tous les arguments passent par `shlex.quote`.
+    `.wmlab/runs|studies/`. Tous les arguments passent par `shlex.quote` (y compris la partie
+    chemin des spécifications rsync `cible:'chemin'`, interprétée par le shell distant) ;
+    `ssh … -- <cible> <commande>` ; `ssh_target` est validé (`[utilisateur@]hôte`, sans
+    option ni espace) ainsi que `workdir`/`data_dir`/`python` (ni `-` initial ni caractère de
+    contrôle). Le lancement renvoie aussi `ps -o lstart= -p $!` (`Job.remote_start`) : poll
+    et annulation ignorent un pid réutilisé par un autre process (job `lost`).
 - `wmlab/server/costs.py` : agrégation (runs hors essais + études + évals + entrées manuelles).
+- `wmlab/server/gitops.py` (`GitRepo`, `GitSync`), `wmlab/server/inventory.py` (inventaire,
+  vérification des tailles, cache), `wmlab/server/hostops.py` (retrait / extinction / état
+  d'instance), `wmlab/server/scaleway.py` (client HTTP) et `wmlab/users.py` : mode hébergé (§12).
 - Le launch file (`env/launch.json`) contient `git` (sha, branch, dirty, remote) + `git_diff`
-  capturés **sur le Mac** au lancement (le serveur distant n'a pas `.git`).
+  capturés **sur le Mac** au lancement (le serveur distant n'a pas `.git`), plus `user`,
+  `git_ref`, `git_sha` (§12.2–12.3 ; pour un lancement par révision, `git` décrit le commit
+  exporté : `{sha, branch: git_ref, dirty: false, remote}`, sans diff).
 
 ---
 
@@ -945,11 +1150,15 @@ interface Overview {
   renderer React 19 + TypeScript + Vite + Tailwind CSS v4 (`@tailwindcss/vite`),
   `@tanstack/react-query`, `react-router` (HashRouter), ECharts (wrapper maison),
   CodeMirror 6 (`@uiw/react-codemirror` + `@codemirror/lang-yaml`), `lucide-react`.
-- Main process : résout le workspace (`WMLAB_WORKSPACE` → `resources/workspace.json` →
-  config userData → dialogue de choix), lance `<workspace>/.venv/bin/python -m wmlab.cli server
-  --port <libre> --token <aléatoire> --workspace <ws>`, attend `/api/health`, expose
-  `window.wmlab = {apiBase, token, platform}` via preload (contextBridge), tue le backend à la
-  fermeture (les jobs d'entraînement, eux, continuent). Fenêtre `titleBarStyle: "hiddenInset"`.
+- Main process : résout le workspace (`WMLAB_WORKSPACE` → config userData `config.json`
+  (choix de l'utilisateur via le menu, mémorisé) → `resources/workspace.json` (défaut embarqué
+  au build) → dialogue de choix ; une source n'est retenue que si son dossier existe), lance `<workspace>/.venv/bin/python -m wmlab.cli server
+  --port <libre> --workspace <ws>` avec le jeton aléatoire dans la variable d'environnement
+  `WMLAB_TOKEN` (jamais sur la ligne de commande, visible par `ps`), attend `/api/health`, expose
+  `window.wmlab = {apiBase, token, platform}` via preload (contextBridge ; le preload obtient
+  `apiBase`/`token` par un IPC synchrone `wmlab:session` réservé à la fenêtre principale), tue
+  le backend à la fermeture (les jobs d'entraînement, eux, continuent). Fenêtre
+  `titleBarStyle: "hiddenInset"`.
 - Hors Electron (navigateur servi par FastAPI) : `apiBase = window.location.origin`, token lu
   depuis `?token=` puis `sessionStorage`.
 - Scripts npm : `dev` (vite + electron), `build` (tsc + vite build), `start` (electron sur le build),
@@ -976,10 +1185,11 @@ interface Overview {
 Pages (routes HashRouter) : `/` Accueil · `/projects/:name` (onglets Vue d'ensemble, Expériences,
 Runs, HPO, Classement) · `/projects/:name/experiments/:exp` (éditeur YAML + timeline des phases +
 validation + lancement) · `/projects/:name/hpo/:plan` (éditeur plan HPO) · `/runs` ·
-`/runs/:id` · `/studies/:id` · `/compare?runs=` · `/leaderboard` · `/library` (registres) ·
+`/runs/:id` · `/studies/:id` (onglets Analyse, Notes = `notes.md` de l'étude) · `/compare?runs=` · `/leaderboard` · `/library` (registres) ·
 `/datasets` · `/benchmarks` · `/hosts` · `/budget` · `/settings`.
 Bouton global « Nouveau lancement » (dialogue : projet → expérience ou plan HPO → machine →
-overrides → durée max → estimation € → lancer).
+overrides → branchement `init_from` (run, checkpoint, phase de départ ou `resume`) → durée max →
+estimation € → lancer).
 
 ---
 
@@ -989,3 +1199,200 @@ overrides → durée max → estimation € → lancer).
   `wmlab plugin-test`, `wmlab train --smoke`).
 - `wmlab-analyse` : analyser runs et études (`wmlab runs show --json`, fichiers de run),
   rédiger les conclusions dans `notes.md`, proposer les prochains plans en tenant compte du budget.
+
+---
+
+## 12. Mode hébergé : serveur central, équipe, git et rapatriement des checkpoints
+
+Objectif : héberger le backend et toutes les données sur un serveur central (petite instance
+Scaleway), laisser le code (scripts d'entraînement, plugins `lab/`, YAML) dans un dépôt git édité
+localement par chaque membre de l'équipe, et garantir qu'aucun checkpoint n'est perdu quand une
+machine GPU est supprimée.
+
+```
+[Postes des membres] ── git push ──► [Dépôt git distant (GitHub/GitLab…)]
+        │ app de bureau (mode distant) ou navigateur          │ git pull --ff-only (auto)
+        ▼                                                     ▼
+[Serveur central : backend wmlab + .wmlab (runs, checkpoints, index, jobs, users)]
+        │ git archive <sha> → rsync → workdir/code/<sha>      ▲ rsync complet (dont *.pt) en fin de job
+        ▼                                                     │
+[Machines GPU Scaleway, créées et retirées à la demande] ─────┘
+```
+
+### 12.1 Réglages (`workspace.yaml`)
+```yaml
+hosted:
+  enabled: false        # true sur le serveur central
+  git_branch: main      # branche suivie par le serveur
+  auto_pull_s: 60       # 0 = désactivé
+  auto_commit: true     # PUT /api/files → commit + push (sinon écriture locale seule)
+  public_url: null      # ex. "https://lab.example.com", affiché dans l'UI
+```
+`WorkspaceSettings.hosted: HostedSettings` (défauts ci-dessus). Les postes des membres gardent
+`enabled: false` (mode local inchangé).
+
+### 12.2 Utilisateurs et jetons (`.wmlab/users.yaml`)
+```yaml
+users:
+  - {name: justin, role: admin, token_sha256: "<hex>", created_at: "…Z", revoked_at: null}
+```
+- Jeton : `wml_<40 hex>` (`secrets.token_hex(20)`), affiché **une seule fois** par
+  `wmlab users add NAME [--role admin|member]` ; seul son SHA-256 est stocké.
+  `wmlab users list`, `wmlab users revoke NAME`. Module : `wmlab.users`
+  (`load_users`, `add_user`, `revoke_user`, `resolve_token(token) -> User | None`).
+- Authentification (`TokenMiddleware`) : un jeton est valide s'il égale le jeton serveur
+  (`--token` / `WMLAB_TOKEN`, utilisateur implicite `{name: "admin", role: "admin"}`) ou s'il
+  correspond à un utilisateur non révoqué. `scope["wmlab_user"] = {"name", "role"}`.
+- Rôles : `member` = tout sauf `PUT /api/hosts`, `PUT /api/settings`, décommission/extinction de
+  machines et gestion des utilisateurs (`admin`). Refus : 403 `{detail}` en français.
+- Attribution : `Job.user`, `run.json.user`, `study.json.user` (string | null) — écrits via le
+  launch file (`launch.json.user`) et `Run.create(launch_info=…)` ; `RunSummary.user`,
+  `StudySummary.user`, `Job.user` exposés par l'API.
+- Routes : `GET /api/me` → `{name: string, role: "admin"|"member", hosted: boolean,
+  public_url: string|null}` ; `GET /api/users` (admin) → `[{name, role, created_at, revoked_at}]`.
+
+### 12.3 Git : révision lancée et édition depuis l'app
+- `GET /api/git` → `GitState = {available: boolean, hosted: boolean, branch: string|null,
+  sha: string|null, short_sha: string|null, dirty: boolean, remote: string|null,
+  ahead: number|null, behind: number|null, last_pull_at: string|null, last_pull_error: string|null}`.
+  `POST /api/git/pull` → `GitState` (pull `--ff-only` immédiat de la branche courante ; 400 sans
+  dépôt git, 409 si arbre sale ou pull impossible, `{detail}` en français).
+- Thread `GitSync` (mode hébergé, `auto_pull_s > 0`) : `git status --porcelain` vide (hors
+  `workspace.yaml`, voir ci-dessous) et serveur sur `hosted.git_branch` ⇒ `git fetch origin
+  <branch>` puis `git merge --ff-only`. Erreurs mémorisées (`last_pull_error`), jamais levées.
+- `PUT /api/files` en mode hébergé avec `auto_commit` : écrire → `git add <path>` →
+  `git commit -m "app(<user>): <path>" --author="<user> <<user>@wmlab.local>"` → `git push origin
+  <branch>` (sur échec : `git pull --rebase` puis un second push). Réponse enrichie :
+  `git: {committed: string|null, pushed: boolean, error: string|null} | null` (`null` hors mode
+  hébergé ou hors dépôt git). Un échec de push laisse le commit local et renvoie 200 avec
+  `pushed: false` ; l'UI l'affiche.
+- `workspace.yaml` (suivi par git, réécrit par `PUT /api/settings`) : en mode hébergé avec
+  `auto_commit`, `PUT /api/settings` fait le même commit + push que `PUT /api/files`
+  (`app(<user>): workspace.yaml` ; réponse inchangée, un échec de push laisse le commit local,
+  visible dans `GitState.ahead`). En repli, ce fichier est exclu du test de saleté
+  (`git status --porcelain -- . ':!workspace.yaml'`, utilisé par `GitState.dirty`, `GitSync` et
+  `POST /api/git/pull`) : un `workspace.yaml` modifié localement ne suspend jamais le pull
+  automatique ; si un pull amont touche ce fichier, l'échec du ff-only est mémorisé dans
+  `last_pull_error`.
+- Lancement : `POST /api/jobs` accepte `git_ref?: string` (défaut : `HEAD` du checkout du
+  serveur ; forme `[A-Za-z0-9][A-Za-z0-9._/-]*`, sans `..`). Résolution
+  `git rev-parse --verify "<ref>^{commit}"` (essayée aussi en `origin/<ref>`, après un
+  `git fetch --prune origin` si la révision est inconnue localement) → `Job.git_ref`,
+  `Job.git_sha` (400 si inconnu). Export : `git archive --format=tar <sha> | tar -x -C
+  <data>/code/<sha>/` (cache marqué par `.wmlab-export` ; les 10 exports les plus récents sont
+  conservés) ; un échec d'export ⇒ job `failed`. Pour un lancement par révision sur une machine
+  `ssh`, le launch file décrit le commit exporté : `git = {sha, branch: git_ref, dirty: false,
+  remote}`, `git_diff: null` (même si la révision est HEAD et que le checkout du serveur est
+  sale : l'export ne contient aucune modification locale).
+- Exécuteur `ssh` avec sha : rsync `<data>/code/<sha>/` → `<workdir>/code/<sha>/` (mêmes
+  exclusions) ; venv **partagé** `<workdir>/.venv` ; `uv sync --frozen --extra train` exécuté dans
+  `<workdir>/code/<sha>` avec `UV_PROJECT_ENVIRONMENT=<workdir>/.venv` seulement si le SHA-256 de
+  `uv.lock` diffère du marqueur `<workdir>/.venv/.wmlab-lock` (écrit après un sync réussi) ;
+  commande : `cd <workdir>/code/<sha> && PYTHONPATH=<workdir>/code/<sha> WMLAB_WORKSPACE=<workdir>/code/<sha> WMLAB_DATA=<data_dir> … <python> -m wmlab.cli …`
+  (`PYTHONPATH` garantit que le package `wmlab` importé est celui du sha, quel que soit
+  l'editable install du venv). Sans dépôt git (ou `git_ref` absent hors mode hébergé) : comportement
+  actuel (rsync du workspace vers `<workdir>`), `Job.git_sha` = HEAD si disponible.
+- Exécuteur `local` : exécute toujours le checkout du serveur (HEAD) ; `git_ref` ≠ HEAD ⇒ 400
+  « la machine locale exécute la révision courante du serveur ». `Job.git_ref = "HEAD"`,
+  `Job.git_sha` = HEAD ; le launch file garde l'état réel du checkout (`dirty`, `git_diff`).
+- Job setup en mode git (mode hébergé avec dépôt) : exporte HEAD vers `<workdir>/code/<sha>`
+  (`Job.git_ref = "HEAD"`) puis lance `scripts/remote_bootstrap.sh` depuis ce dossier avec
+  `UV_PROJECT_ENVIRONMENT=<workdir>/.venv` ; sinon rsync du workspace vers `<workdir>` et
+  bootstrap depuis `<workdir>` (`git_ref: null`). Le venv est `<workdir>/.venv` dans les deux
+  cas ; le script écrit le marqueur `.wmlab-lock`.
+
+### 12.4 Rapatriement des checkpoints et retrait d'une machine
+- **Fin de job (train/hpo/eval)** : synchronisation **complète** (`checkpoints/*.pt` inclus) des
+  runs et études du job, puis vérification : chaque entrée de `checkpoints/index.json` doit exister
+  localement avec `size_bytes` identique (une relance rsync sur écart). Résultat dans
+  `Job.retrieval: {status: "complete"|"partial"|"failed"|"n/a", checkpoints: number, bytes: number,
+  missing: string[]} | null`. Le job reste `completed` même si `partial` (l'UI l'affiche en
+  avertissement). `Checkpoint.available_locally` reflète l'état sur le serveur.
+- **Inventaire** : `GET /api/hosts/{name}/inventory` →
+  `HostInventory = {host: string, reachable: boolean, error: string|null, checked_at: string,
+  active_jobs: number, remote_data_dir: string|null,
+  runs: {run_id: string, project: string|null, status: string|null, checkpoints_total: number,
+         checkpoints_local: number, bytes_remote: number, bytes_missing: number, indexed: boolean}[],
+  studies: {study_id: string, trials: number, synced: boolean}[],
+  unretrieved_checkpoints: number, unretrieved_bytes: number, unindexed_runs: number}`.
+  Implémentation ssh : une commande distante listant `<data_dir>/runs/*/checkpoints/index.json`
+  et les tailles des `*.pt` (`find … -printf '%p\t%s\n'`), comparée aux fichiers locaux.
+  Hôte `local` : inventaire trivial (tout est local). Résultat mis en cache dans
+  `.wmlab/hosts_inventory.json` ; `Host` expose `unretrieved_checkpoints: number|null`,
+  `unretrieved_bytes: number|null`, `inventory_at: string|null`, `active_jobs: number`.
+- **Rapatriement** : `POST /api/hosts/{name}/retrieve` → `Job` de `kind: "retrieve"`
+  (`target` = nom de l'hôte) : rsync complet de **tous** les runs et études présents sur l'hôte
+  (pas seulement ceux lancés par l'app), vérification comme ci-dessus, réindexation ;
+  `Job.result: {runs: number, studies: number, checkpoints: number, bytes: number,
+  missing: string[]} | null` (mis à jour pendant le transfert). Un job `retrieve` ne compte pas
+  dans `max_concurrent_jobs` ; il est accepté sur une machine déjà retirée (400 pour la
+  machine locale, 409 si un rapatriement de la même machine est actif) ; il s'exécute dans le
+  process du serveur : interrompu par un redémarrage, il passe `lost` (le relancer ; rsync
+  reprend où il en était) ; l'inventaire de la machine est recalculé à sa fin.
+- **Retrait** : `POST /api/hosts/{name}/decommission` body
+  `{confirm: true, delete_instance?: boolean, force?: boolean}` (admin ; 400 sans `confirm` ou
+  pour la machine locale). Refus 409 si la machine est déjà retirée, si un job est actif sur
+  l'hôte, si l'inventaire (recalculé à l'appel) a `unretrieved_checkpoints > 0` ou
+  `unindexed_runs > 0` (message : « N checkpoints (X Go) non rapatriés — lancez le
+  rapatriement »), ou si l'hôte est injoignable (sauf `force: true`, admin, journalisé). Une
+  erreur de l'API Scaleway (502) laisse la machine non retirée. Succès : `HostSpec.decommissioned_at`
+  renseigné (l'entrée reste dans `hosts.yaml` pour l'historique, plus proposée au lancement) ;
+  si `delete_instance` et `host.scaleway` configuré et `SCW_SECRET_KEY` présent dans
+  l'environnement du serveur : suppression de l'instance via l'API Scaleway (voir 12.5).
+  Réponse : `{ok: true, deleted_instance: boolean, instance_state: string|null, message: string}`.
+- **Extinction** : `POST /api/hosts/{name}/poweroff` (admin ; même garde « aucun job actif » ;
+  400 sans `scaleway` configuré ou sans `SCW_SECRET_KEY`, 502 erreur API ; `poweroff` conserve
+  les volumes, facturation GPU arrêtée ; attente de l'état `stopped`) → `{ok, instance_state}`.
+- `HostSpec` (et `Host` API) gagne : `scaleway: {zone: string, server_id: string} | null`,
+  `decommissioned_at: string | null`. Les jobs refusent une machine décommissionnée (400).
+
+### 12.5 Client Scaleway (`wmlab/server/scaleway.py`)
+- `httpx` (dépendance de l'extra `server`), base `https://api.scaleway.com`, en-tête
+  `X-Auth-Token: $SCW_SECRET_KEY` ; jamais de clé dans `hosts.yaml`, les logs ou l'API.
+- `get_server(zone, server_id) -> {id, name, state, commercial_type, zone, volumes: [...]}` ;
+  `server_action(zone, server_id, action)` avec `action ∈ {poweroff, terminate}` (POST
+  `/instance/v1/zones/{zone}/servers/{id}/action`) ; `delete_server(zone, server_id,
+  with_volumes=True)` = `terminate` puis suppression des volumes restants (`DELETE
+  /instance/v1/zones/{zone}/volumes/{id}`) ; attente de l'état final avec timeout (5 min).
+- `GET /api/hosts/{name}/instance` → `{configured: boolean, state: string|null, commercial_type,
+  zone, error: string|null}` (jamais d'exception).
+- Erreurs API → `JobError(502, message en français)`.
+
+### 12.6 Desktop et navigateur en mode équipe
+- **Écran de connexion** (`LoginGate`) : affiché quand aucun jeton n'est connu ou que
+  `GET /api/me` renvoie 401 : champ jeton (et URL du serveur en navigateur si l'origine n'est pas
+  le backend) ; jeton mémorisé dans `localStorage` (`wmlab.token`, try/catch) en navigateur ;
+  bouton « Se déconnecter » dans le pied de la sidebar, qui affiche le nom de l'utilisateur.
+- **Electron, mode distant** : `config.json` (userData) `{mode: "remote", apiBase, token}` ;
+  jeton chiffré via `safeStorage` quand disponible ; menu « Serveur » : « Se connecter à un serveur
+  distant… » (dialogue URL + jeton, validation `/api/health` + `/api/me`), « Utiliser le backend
+  local ». En mode distant, aucun backend n'est lancé ; `window.wmlab = {apiBase, token,
+  platform, mode}`.
+- **Auteur** : colonne/label « par <user> » dans les listes de runs, d'études et de jobs ;
+  filtre « mes runs ».
+- **Dialogue de lancement** : champ « Révision git » pré-rempli depuis `GET /api/git`
+  (`branch @ short_sha`), avertissement si `dirty` hors mode hébergé, aide « poussez votre branche
+  puis indiquez son nom ou un sha ».
+- **Éditeur de spec** : après enregistrement, toast « Enregistré · commité abc1234 · poussé » ou
+  avertissement « commité mais non poussé : … ».
+- **Machines** : par machine, inventaire (runs, checkpoints non rapatriés en nombre et Go, jobs
+  actifs, état de l'instance Scaleway si configurée), boutons « Rapatrier les checkpoints »
+  (job `retrieve` avec progression), « Éteindre l'instance », « Retirer la machine » (désactivé tant
+  qu'il reste des checkpoints non rapatriés ou des jobs actifs ; dialogue de confirmation qui
+  récapitule runs/checkpoints vérifiés et propose « supprimer aussi l'instance Scaleway » quand
+  c'est configuré). Badge d'avertissement sur la carte tant que `unretrieved_checkpoints > 0`.
+- **Réglages** : section « Mode hébergé » (branche, dernier pull, bouton « Tirer maintenant »,
+  URL publique), section « Utilisateurs » (admin : liste + rappel `wmlab users add`).
+
+### 12.7 Déploiement (`deploy/`)
+- `deploy/install_server.sh` (Ubuntu 24.04, idempotent) : paquets (git, rsync, curl), uv,
+  Node 22 (NodeSource), clone du dépôt (`--repo URL --branch main --dir /opt/wmlab`),
+  `uv sync --extra server --extra train` (+ `--extra cpu` si l'extra CPU-only de torch est défini
+  dans `pyproject.toml` via les sources uv conditionnelles), `npm ci && npm run build` dans
+  `desktop/`, `wmlab users add <nom> --role admin` (jeton affiché ; le nom `admin` est réservé à
+  l'utilisateur implicite du jeton serveur), service systemd
+  `deploy/wmlab-server.service` (`EnvironmentFile=/etc/wmlab/env` : `WMLAB_WORKSPACE`,
+  `WMLAB_TOKEN`, `SCW_SECRET_KEY` optionnel), reverse proxy `deploy/Caddyfile` (HTTPS
+  automatique → `127.0.0.1:8765`), `deploy/backup.sh` (archive quotidienne de `.wmlab` vers un
+  bucket Object Storage via `rclone` si présent, sinon `tar` local), `deploy/README.md`
+  (DNS, clé SSH du serveur à déposer sur les machines GPU, jeton par membre, connexion de l'app).

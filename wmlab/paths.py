@@ -5,6 +5,7 @@ Environment variables:
 - ``WMLAB_DATA``: data root (default: ``<workspace>/<data_dir>``).
 - ``WMLAB_HOST``: current host name (default ``local``).
 - ``WMLAB_PRICE_EUR_PER_HOUR``: price of the current host (default ``0``).
+- ``WMLAB_WEIGHTS``: official pretrained weights folder (default: ``<data>/weights``).
 """
 
 from __future__ import annotations
@@ -106,6 +107,15 @@ def studies_dir() -> Path:
 def cache_dir() -> Path:
     """Return ``<data>/cache`` (created if needed)."""
     return _ensure_dir(data_root() / "cache")
+
+
+def weights_dir() -> Path:
+    """Return the official pretrained weights folder (``WMLAB_WEIGHTS``, default
+    ``<data>/weights``; created if needed)."""
+    env = os.environ.get("WMLAB_WEIGHTS")
+    if env:
+        return _ensure_dir(Path(env).expanduser().resolve())
+    return _ensure_dir(data_root() / "weights")
 
 
 def jobs_dir() -> Path:

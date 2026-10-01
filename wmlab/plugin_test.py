@@ -171,13 +171,20 @@ def _check_model(c: _Checks, entry: Entry, modality: str, params: dict[str, Any]
         norm = _grad_norm(model.parameters())
         return norm > 0 and norm == norm and norm != float("inf"), f"|grad| = {norm:.3e}"
 
-    c.run("gradient depuis les logits (perte message)", grad_logits)
-    c.run("gradient depuis x_w (perte d'imperceptibilité)", grad_xw)
+    if getattr(model, "trainable", True) is False:
+        c.add("gradients", True, "baseline figée (poids officiels, évaluation seule) : "
+                                 "non vérifiés")
+    else:
+        c.run("gradient depuis les logits (perte message)", grad_logits)
+        c.run("gradient depuis x_w (perte d'imperceptibilité)", grad_xw)
 
     def forward_is_embed() -> tuple[bool, str]:
         model.eval()
-        with torch.no_grad():
-            a, b = model(x, msg), model.embed(x, msg)
+        with torch.no_grad(), torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)  # same draws for a stochastic embed (e.g. optimisation)
+            a = model(x, msg)
+            torch.manual_seed(0)
+            b = model.embed(x, msg)
         model.train()
         diff = float((a - b).abs().max())
         return diff <= 1e-5, f"écart max {diff:.2e}"
@@ -374,7 +381,7 @@ def _check_loss(c: _Checks, entry: Entry, modality: str, params: dict[str, Any])
         if not isinstance(out, torch.Tensor) or out.numel() != 1:
             shape = tuple(out.shape) if isinstance(out, torch.Tensor) else type(out).__name__
             return False, f"sortie {shape} (scalaire attendu)"
-        return bool(torch.isfinite(out).all()), f"valeur = {float(out):.4g}"
+        return bool(torch.isfinite(out).all()), f"valeur = {float(out.detach()):.4g}"
 
     c.run("scalaire fini", value, required=True)
 
@@ -463,8 +470,15 @@ def run_plugin_test(kind: str, name: str, modality: str | None = None, *,
         c.add("torch", False, "PyTorch n'est pas installé")
         return c.results
     torch.manual_seed(0)
+    test_params = make_test_params(entry, modality, params)
+    missing = sorted(k for k in _accepted(entry)[1] if k not in test_params and k != "nbits")
+    if missing:
+        c.add("paramètres requis", False,
+              f"paramètre(s) sans valeur par défaut : {', '.join(missing)} — indiquez-les avec "
+              f"--param {missing[0]}=<valeur> (ex. un dossier de fichiers pour un dataset)")
+        return c.results
     try:
-        _CHECKERS[entry.kind](c, entry, modality, make_test_params(entry, modality, params))
+        _CHECKERS[entry.kind](c, entry, modality, test_params)
     except _Stop:
         pass
     except Exception as exc:  # noqa: BLE001

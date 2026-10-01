@@ -10,7 +10,7 @@ import {
   useQueryClient,
   type Query,
 } from "@tanstack/react-query";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { useDebouncedValue } from "./hooks";
 import { isActiveStatus } from "./runs";
 import type {
@@ -18,11 +18,15 @@ import type {
   CreateHpoPlanBody,
   CreateJobBody,
   CreateProjectBody,
+  DecommissionBody,
   EstimateBody,
+  GitState,
   Host,
   Job,
   LeaderboardQuery,
+  Me,
   Overview,
+  ProjectSummary,
   RunDetail,
   RunsQuery,
   RunSummary,
@@ -73,6 +77,12 @@ export const qk = {
   estimate: (body: EstimateBody) => ["estimate", body] as const,
   costs: ["costs"] as const,
   settings: ["settings"] as const,
+  // §12
+  me: ["me"] as const,
+  users: ["users"] as const,
+  git: ["git"] as const,
+  hostInventory: (name: string) => ["hosts", "inventory", name] as const,
+  hostInstance: (name: string) => ["hosts", "instance", name] as const,
 };
 
 const anyActive = (items: { status: string }[] | undefined) => !!items?.some((i) => isActiveStatus(i.status));
@@ -85,12 +95,25 @@ export function useHealth() {
   return useQuery({ queryKey: qk.health, queryFn: ({ signal }) => api.health(signal), refetchInterval: 15000, retry: 0 });
 }
 
+/** The overview describes something live (a running run or an active job). */
+const overviewActive = (o: Overview | undefined) => !!o && (o.counts.running > 0 || anyActive(o.running) || anyActive(o.jobs));
+
+/** Workspace overview (sidebar + home): 5 s while something runs, 30 s otherwise. */
 export function useOverview() {
-  return useQuery({ queryKey: qk.overview, queryFn: api.overview, refetchInterval: LIVE_INTERVAL });
+  return useQuery({
+    queryKey: qk.overview,
+    queryFn: api.overview,
+    refetchInterval: (q: Query<Overview>) => (overviewActive(q.state.data) ? LIVE_INTERVAL : IDLE_INTERVAL),
+  });
 }
 
+/** Project list: 10 s while a project has running runs, 30 s otherwise. */
 export function useProjects() {
-  return useQuery({ queryKey: qk.projects, queryFn: api.listProjects, refetchInterval: 10000 });
+  return useQuery({
+    queryKey: qk.projects,
+    queryFn: api.listProjects,
+    refetchInterval: (q: Query<ProjectSummary[]>) => (q.state.data?.some((p) => p.n_running > 0) ? LIVE_INTERVAL * 2 : IDLE_INTERVAL),
+  });
 }
 
 export function useProject(name: string | null | undefined) {
@@ -278,6 +301,110 @@ export function useSettings() {
   return useQuery({ queryKey: qk.settings, queryFn: api.getSettings, staleTime: 30000 });
 }
 
+// §12 — hosted mode -----------------------------------------------------------
+
+/** Statut HTTP d'une erreur de requête (0 hors ApiError). */
+export const errorStatus = (err: unknown): number => (err instanceof ApiError ? err.status : 0);
+
+/**
+ * Current user (`GET /api/me`). Never retried: a 401 means the token is refused and the
+ * LoginGate takes over; any other error (older backend without the route, network) leaves
+ * the app usable with an unknown user.
+ */
+export function useMe(opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: qk.me,
+    queryFn: ({ signal }) => api.me(signal),
+    enabled: opts.enabled ?? true,
+    retry: 0,
+    staleTime: 30000,
+    refetchInterval: 60000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** Convenience: `{name, role}` of the current user, or null while unknown. */
+export function useCurrentUser(): Me | null {
+  const me = useMe();
+  return me.data ?? null;
+}
+
+export function useUsers(enabled = true) {
+  return useQuery({ queryKey: qk.users, queryFn: api.listUsers, enabled, staleTime: 30000, retry: 0 });
+}
+
+/** Git state of the server checkout (`GET /api/git`); polled slowly (auto pull runs server-side). */
+export function useGit(opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: qk.git,
+    queryFn: ({ signal }) => api.git(signal),
+    enabled: opts.enabled ?? true,
+    retry: 0,
+    staleTime: 10000,
+    refetchInterval: IDLE_INTERVAL,
+  });
+}
+
+export function useGitPull() {
+  const qc = useQueryClient();
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: () => api.gitPull(),
+    onSuccess: (git: GitState) => {
+      qc.setQueryData(qk.git, git);
+      return invalidate(qk.projects, qk.benchmarks, qk.datasets, qk.registry, ["file"]);
+    },
+  });
+}
+
+/** Host inventory (§12.4), loaded on demand (`enabled`) and after each retrieve job. */
+export function useHostInventory(name: string | null | undefined, opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: qk.hostInventory(name ?? ""),
+    queryFn: ({ signal }) => api.hostInventory(name!, signal),
+    enabled: !!name && (opts.enabled ?? true),
+    retry: 0,
+    staleTime: 15000,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** Scaleway instance state (§12.5), loaded with the inventory panel. */
+export function useHostInstance(name: string | null | undefined, opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: qk.hostInstance(name ?? ""),
+    queryFn: ({ signal }) => api.hostInstance(name!, signal),
+    enabled: !!name && (opts.enabled ?? true),
+    retry: 0,
+    staleTime: 15000,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useRetrieveHost() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: (name: string) => api.retrieveHost(name),
+    onSuccess: () => invalidate(["jobs"], qk.overview),
+  });
+}
+
+export function useDecommissionHost() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: DecommissionBody }) => api.decommissionHost(name, body),
+    onSuccess: (_res, { name }) => invalidate(qk.hosts, qk.hostInventory(name), qk.hostInstance(name), ["jobs"], qk.overview),
+  });
+}
+
+export function usePoweroffHost() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: (name: string) => api.poweroffHost(name),
+    onSuccess: (_res, name) => invalidate(qk.hostInstance(name)),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
@@ -336,6 +463,16 @@ export function useSetRunNotes(runId: string) {
     mutationFn: (notes: string) => api.setRunNotes(runId, notes),
     onSuccess: (_res, notes) => {
       qc.setQueryData(qk.run(runId), (old: RunDetail | undefined) => (old ? { ...old, notes } : old));
+    },
+  });
+}
+
+export function useSetStudyNotes(studyId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (notes: string) => api.setStudyNotes(studyId, notes),
+    onSuccess: (_res, notes) => {
+      qc.setQueryData(qk.study(studyId), (old: StudyDetail | undefined) => (old ? { ...old, notes } : old));
     },
   });
 }

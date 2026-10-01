@@ -1,0 +1,19 @@
+# Projet « Audio — AudioSeal-lite » — format : ARCHITECTURE.md §5.2
+#
+# Watermarking audio : générateur résiduel 1D + détecteur conv 1D (esprit AudioSeal, en
+# beaucoup plus petit). Clips mono 16 kHz, tenseurs [B, 1, T] dans [-1, 1].
+name: audio-seal-lite                # = nom du dossier projects/audio-seal-lite
+title: "Audio — AudioSeal-lite"
+modality: audio
+description: >-
+  Schéma audio de référence : encodeur résiduel 1D + détecteur convolutif, message de
+  16 bits, robustesse aux codecs (MP3/AAC), au filtrage, au bruit et au rééchantillonnage.
+message_bits: 16                     # AudioSeal utilise 16 bits : suffisant pour un identifiant
+default_benchmark: audio_v2          # v2 : FPR atteignables avec 16 bits (audio_v1 : tpr@1e-06 toujours 0)
+
+# Axes du front de Pareto. SNR = rapport signal/résidu du watermark (plus haut = moins audible).
+objectives:
+  quality:    {metric: snr, direction: maximize, label: "SNR (dB)", constraint: ">= 25"}
+  robustness: {metric: bit_acc_mean, direction: maximize, label: "Bit acc. moyenne"}
+
+tags: [audio, baseline]

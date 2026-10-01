@@ -11,6 +11,7 @@ desktop/node_modules/
 desktop/dist/
 desktop/release/
 desktop/resources/workspace.json
+desktop/.selftest/
 # Divers
 .DS_Store
 *.pt

@@ -1,0 +1,16 @@
+# Catalogue de datasets — format : ARCHITECTURE.md §5.6
+# Référence dans une spec : {dataset: audio_folder, params: {root: "@voxpopuli_en"}}
+name: voxpopuli_en
+modality: audio
+description: >-
+  VoxPopuli (anglais, parole transcrite) : discours du Parlement européen, conditions
+  d'enregistrement variées (micro, salle, réverbération) — complète LibriSpeech pour la
+  robustesse. Préparation : dépôt facebookresearch/voxpopuli, puis
+  « python -m voxpopuli.download_audios --root <ROOT> --subset asr » et
+  « python -m voxpopuli.get_asr_data --root <ROOT> --lang en ».
+source: "https://github.com/facebookresearch/voxpopuli"
+license: "CC0 (voir aussi la notice légale du Parlement européen pour les données brutes)"
+paths:
+  default: "~/datasets/voxpopuli/transcribed_data/en"
+  # Exemple d'hôte Scaleway :
+  # scw-l40s: "/root/datasets/voxpopuli/transcribed_data/en"

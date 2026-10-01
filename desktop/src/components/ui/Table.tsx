@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { Skeleton } from "./Skeleton";
 
@@ -17,6 +17,8 @@ export interface Column<T> {
   headerClassName?: string;
   /** Header tooltip. */
   title?: string;
+  /** Allow cell content to wrap (default: single line). */
+  wrap?: boolean;
 }
 
 export interface SortState {
@@ -143,25 +145,27 @@ export function Table<T>({
                   key={col.id}
                   title={col.title}
                   style={{ width: col.width }}
-                  className={clsx(
-                    cellPad,
-                    "whitespace-nowrap text-[12px] font-medium text-muted",
-                    alignCls(col.align),
-                    col.sortValue && "cursor-pointer select-none hover:text-fg",
-                    col.headerClassName,
-                  )}
-                  onClick={() => toggleSort(col)}
+                  className={clsx(cellPad, "whitespace-nowrap text-[12px] font-medium text-muted", alignCls(col.align), col.headerClassName)}
                   aria-sort={active ? (sort!.desc ? "descending" : "ascending") : undefined}
                 >
-                  <span className={clsx("inline-flex items-center gap-1", col.align === "right" && "flex-row-reverse")}>
-                    {col.header}
-                    {active &&
-                      (sort!.desc ? (
-                        <ArrowDown size={12} strokeWidth={2} aria-hidden />
-                      ) : (
-                        <ArrowUp size={12} strokeWidth={2} aria-hidden />
-                      ))}
-                  </span>
+                  {col.sortValue ? (
+                    // A real button: sortable headers are reachable and operable from the keyboard.
+                    <button
+                      type="button"
+                      onClick={() => toggleSort(col)}
+                      className={clsx("inline-flex select-none items-center gap-1 hover:text-fg", col.align === "right" && "flex-row-reverse")}
+                    >
+                      {col.header}
+                      {active &&
+                        (sort!.desc ? (
+                          <ArrowDown size={12} strokeWidth={2} aria-hidden />
+                        ) : (
+                          <ArrowUp size={12} strokeWidth={2} aria-hidden />
+                        ))}
+                    </button>
+                  ) : (
+                    <span className={clsx("inline-flex items-center gap-1", col.align === "right" && "flex-row-reverse")}>{col.header}</span>
+                  )}
                 </th>
               );
             })}
@@ -194,9 +198,21 @@ export function Table<T>({
               <tr
                 key={key}
                 onClick={onRowClick ? (e) => onRowClick(row, e) : undefined}
+                // Clickable rows are focusable and open with Enter (Space is left to the checkbox).
+                tabIndex={onRowClick ? 0 : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (e: KeyboardEvent<HTMLTableRowElement>) => {
+                        if (e.key === "Enter" && e.target === e.currentTarget) {
+                          e.preventDefault();
+                          onRowClick(row, e as unknown as MouseEvent<HTMLTableRowElement>);
+                        }
+                      }
+                    : undefined
+                }
                 className={clsx(
                   "border-t border-border transition-colors first:border-t-0",
-                  onRowClick && "cursor-pointer hover:bg-hover",
+                  onRowClick && "cursor-pointer hover:bg-hover focus-visible:bg-hover focus-visible:outline-none",
                   isSel && "bg-accent-soft/50",
                   rowClassName?.(row),
                 )}
@@ -213,7 +229,7 @@ export function Table<T>({
                   </td>
                 )}
                 {columns.map((col) => (
-                  <td key={col.id} className={clsx(cellPad, "align-middle", alignCls(col.align), col.className)}>
+                  <td key={col.id} className={clsx(cellPad, "align-middle", !col.wrap && "whitespace-nowrap", alignCls(col.align), col.className)}>
                     {col.cell(row, i)}
                   </td>
                 ))}

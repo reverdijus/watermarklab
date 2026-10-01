@@ -1,0 +1,15 @@
+# Watermark Lab — sauvegarde quotidienne de .wmlab (déclenchée par wmlab-backup.timer).
+[Unit]
+Description=Watermark Lab — sauvegarde quotidienne de .wmlab
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__WMLAB_USER__
+Group=__WMLAB_USER__
+EnvironmentFile=__WMLAB_ENV__
+# WMLAB_BACKUP_BUCKET (bucket du remote rclone « wmlab-backup »), WMLAB_BACKUP_KEEP_DAYS (14),
+# WMLAB_BACKUP_CHECKPOINTS=1 (inclure les .pt dans l'archive locale) : voir deploy/backup.sh.
+ExecStart=/usr/local/bin/wmlab-backup
+Nice=10
+IOSchedulingClass=idle

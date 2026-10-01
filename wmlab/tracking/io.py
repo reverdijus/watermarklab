@@ -102,6 +102,15 @@ def json_line(obj: Any) -> str:
     return json.dumps(sanitize(obj), ensure_ascii=False, separators=(",", ":"))
 
 
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    """Append one row to a JSONL file (single write + flush; parent folder created)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json_line(row) + "\n")
+        handle.flush()
+
+
 def tail_lines(path: Path, n: int, chunk_size: int = 65536) -> list[str]:
     """Return the last ``n`` lines of a text file without reading it entirely."""
     if n <= 0:

@@ -7,6 +7,7 @@ import {
   Gauge,
   House,
   Library,
+  LogOut,
   PanelLeftClose,
   Plus,
   Server,
@@ -18,8 +19,10 @@ import {
 import { Button, IconButton, ModalityDot, ProgressBar, Skeleton, Tooltip } from "../ui";
 import { NewProjectDialog } from "../NewProjectDialog";
 import { useLaunch } from "../launch/LaunchProvider";
+import { useSession } from "../LoginGate";
+import { getApiConfig } from "../../lib/api";
 import { formatEur, plural } from "../../lib/format";
-import { useOverview, useProjects } from "../../lib/queries";
+import { useMe, useOverview, useProjects } from "../../lib/queries";
 import { isActiveStatus, projectPath } from "../../lib/runs";
 
 interface NavItem {
@@ -57,7 +60,12 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const { openLaunch } = useLaunch();
   const projects = useProjects();
   const overview = useOverview();
+  const me = useMe();
+  const { logout } = useSession();
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  // Electron with its own backend: the session is implicit (no user to disconnect).
+  const config = getApiConfig();
+  const canLogout = !(config.source === "electron" && config.mode === "local");
 
   const jobs = overview.data?.jobs ?? [];
   const activeJobs = jobs.filter((j) => isActiveStatus(j.status)).length;
@@ -162,6 +170,20 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
               className="mt-1.5"
             />
           </Link>
+          {(me.data || canLogout) && (
+            <div className="flex items-center justify-between gap-2 text-[12.5px]">
+              <Link to="/settings" className="no-drag flex min-w-0 items-center gap-2 text-muted hover:text-fg" title={me.data ? `Connecté en tant que ${me.data.name} (${me.data.role === "admin" ? "administrateur" : "membre"})` : undefined}>
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10.5px] font-semibold uppercase text-accent" aria-hidden>
+                  {(me.data?.name ?? "?").slice(0, 1)}
+                </span>
+                <span className="truncate">
+                  {me.data ? me.data.name : "Utilisateur inconnu"}
+                  {me.data?.role === "admin" && <span className="text-faint"> · admin</span>}
+                </span>
+              </Link>
+              {canLogout && <IconButton icon={LogOut} label="Se déconnecter" size="sm" onClick={logout} tooltipSide="right" />}
+            </div>
+          )}
         </div>
       </div>
       <NewProjectDialog open={newProjectOpen} onClose={() => setNewProjectOpen(false)} />

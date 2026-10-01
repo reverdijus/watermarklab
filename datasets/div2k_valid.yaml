@@ -1,0 +1,16 @@
+# Catalogue de datasets — format : ARCHITECTURE.md §5.6
+# Référence dans une spec : root: "@div2k_valid" (résolu selon WMLAB_HOST, sinon paths.default).
+name: div2k_valid
+modality: image
+description: >-
+  DIV2K validation : 100 images 2K de haute qualité (paysages, textures, personnes).
+  Idéal pour un benchmark image v2 figé (image_folder + center_crop). Téléchargement :
+  http://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip (dossier DIV2K_valid_HR/).
+source: "https://data.vision.ee.ethz.ch/cvl/DIV2K/"
+license: >-
+  Recherche académique uniquement (« academic research purpose only ») ; images collectées
+  sur Internet, droits détenus par leurs auteurs.
+paths:
+  default: "~/datasets/div2k/DIV2K_valid_HR"
+  # Exemple d'hôte Scaleway :
+  # scw-l40s: "/root/datasets/div2k/DIV2K_valid_HR"

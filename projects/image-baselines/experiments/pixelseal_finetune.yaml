@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « pixelseal_finetune » — projet image-baselines (image, 32 bits)
+# Fine-tuning de Pixel Seal (Meta, MIT) depuis ses poids officiels : le modèle est construit
+# avec les poids officiels (pas besoin d'init_from), puis entraîné par le curriculum ci-dessous.
+# Référence à battre : l'expérience « pixelseal » (mêmes poids, évaluation seule, mêmes
+# données de validation et même benchmark).
+#
+# Poids : .venv/bin/python -m wmlab.cli weights pull pixelseal   (1,2 Go, une fois par machine ;
+#         sur une machine GPU : « download: true » ci-dessous, ou la commande par SSH)
+# Données : COCO 2017 (@coco2017, catalogue datasets/coco2017.yaml) — à installer sur la
+#         machine qui entraîne ; le mode --smoke les remplace par du synthétique.
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/image-baselines/experiments/pixelseal_finetune.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/image-baselines/experiments/pixelseal_finetune.yaml --smoke
+# Lancer   : app → « Nouveau lancement » → image-baselines → pixelseal_finetune → GPU Scaleway
+#            (révision git poussée, durée max ~1 h pour le premier run : mesurer le débit)
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: pixelseal_finetune
+description: >-
+  Pixel Seal depuis ses poids officiels : adaptation du détecteur aux attaques du lab (embedder
+  gelé), puis affinage conjoint à LR faible avec une contrainte d'imperceptibilité forte
+hypothesis: >-
+  Adapter d'abord le détecteur aux attaques du lab (embedder gelé : PSNR inchangé) puis
+  affiner conjointement à LR faible (1e-5) avec un poids image fort augmente val/bit_acc_mean
+  d'au moins 0,03 par rapport à l'expérience « pixelseal » (poids officiels) en perdant au plus
+  1 dB de PSNR : le résidu est borné par scaling_w × JND, seul son contenu change.
+seed: 0
+
+model:
+  name: pixelseal
+  params:
+    scaling_w: 0.2                   # amplitude officielle, gardée fixe : le fine-tuning agit sur le contenu
+    jnd: true
+    download: false                  # true sur une machine GPU sans les poids (1,2 Go)
+
+data:
+  train:
+    dataset: image_folder
+    params: {root: "@coco2017"}      # photos réelles : ne pas dégrader un modèle appris sur SA-1B
+    preprocess:
+      - {name: random_resized_crop, params: {size: 256, scale: [0.5, 1.0]}}
+      - {name: hflip, params: {p: 0.5}}
+  val:                               # identique à l'expérience « pixelseal » : val/* comparables
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 64, seed: 1}
+  batch_size: 16
+  num_workers: 4
+
+# LR faible : on part d'un optimum (l'entraînement officiel de Video Seal finit à 1e-6).
+optimizer: {name: adamw, lr: 1.0e-5, weight_decay: 0.0, betas: [0.9, 0.999], grad_clip: 1.0}
+
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}
+    # PSNR ~45–55 dB ⇔ MSE ~1e-5 : il faut un poids ~1e3 pour que la qualité pèse face à la BCE.
+    img: {name: mse, weight: 1000.0}
+
+phases:
+  # 1) Détecteur seul (embedder gelé, statistiques BatchNorm officielles conservées) : il
+  #    apprend les attaques du lab sans toucher à l'image tatouée.
+  - name: detector_adapt
+    steps: 1000
+    lr: {schedule: linear_warmup, warmup_steps: 100}
+    freeze: ["embedder."]
+    loss_weights: {img: 0.0}         # sans effet quand l'embedder est gelé
+    attacks:
+      - {name: identity, p: 0.3}
+      - {name: jpeg_diff, params: {quality: 50}}
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+      - {name: resize, params: {scale: 0.5}}
+      - {name: gaussian_noise, params: {std: 0.06}}
+    attack_strength: {ramp: [0.3, 1.0]}
+
+  # 2) Affinage conjoint : l'embedder suit le détecteur, sous contrainte image forte, avec le
+  #    vrai JPEG (non différentiable : straight-through automatique).
+  - name: joint_finetune
+    steps: 2000
+    lr: {schedule: cosine, warmup_steps: 100, min_factor: 0.1}
+    loss_weights: {img: 1000.0}
+    attacks:
+      - {name: identity, p: 0.2}
+      - {name: jpeg, params: {quality: 50}}
+      - {name: jpeg_diff, params: {quality: 50}}
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+      - {name: resize, params: {scale: 0.5}}
+      - {name: gaussian_noise, params: {std: 0.06}}
+    attack_strength: 1.0
+
+eval:
+  every_steps: 500
+  val_batches: 4                     # les 64 images de validation, comme « pixelseal »
+  val_attacks:
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+    - {label: crop50, name: crop, params: {area: 0.5}}
+  final_benchmark: {benchmark: image_v1, checkpoints: [last, "best:val/bit_acc_mean"]}
+
+# ~0,9 Go par checkpoint (77 M paramètres + état AdamW) : politique sobre (disque du Mac au
+# rapatriement) — fins de phase + meilleur val/bit_acc_mean + dernier.
+checkpoint:
+  every_steps: null
+  keep_last: 1
+  keep_best: {"val/bit_acc_mean": max}
+  at_phase_end: true                 # « phase_end:detector_adapt » : point de branchement
+
+samples: {every_steps: 1000, count: 4}
+resources: {device: auto, precision: auto, compile: false}
+tags: [pixelseal, finetune, pretrained]

@@ -30,9 +30,10 @@ export const METRIC_INFO: Record<string, MetricInfo> = {
     label: "Bit acc. moyenne",
     direction: "maximize",
     kind: "ratio",
-    hint: "Moyenne de la bit accuracy sur les attaques (hors identité)",
+    hint: "Moyenne de la bit acc. sur les attaques (hors identité)",
   },
   loss: { label: "Perte", direction: "minimize", kind: "number" },
+  grad_norm: { label: "Norme du gradient", direction: null, kind: "number", hint: "Norme L2 du gradient (avant clipping)" },
   lr: { label: "Taux d'apprentissage", direction: null, kind: "sci" },
   attack_strength: { label: "Force d'attaque", direction: null, kind: "number" },
   step_time_s: { label: "Temps par step", direction: "minimize", kind: "seconds" },
@@ -42,6 +43,7 @@ export const METRIC_INFO: Record<string, MetricInfo> = {
   gpu_mem_gb: { label: "Mémoire GPU", direction: null, kind: "gb" },
   cpu_percent: { label: "CPU", direction: null, kind: "percent100" },
   ram_gb: { label: "RAM", direction: null, kind: "gb" },
+  proc_ram_gb: { label: "RAM du process", direction: null, kind: "gb", hint: "Mémoire résidente du process d'entraînement" },
   step: { label: "Step", direction: null, kind: "int" },
 };
 
@@ -61,7 +63,7 @@ export const GROUP_LABELS: Record<string, string> = {
 };
 
 const GROUP_ORDER = ["train", "val", "best", "eval", "system", "other"];
-const SYSTEM_KEYS = new Set(["gpu_util", "gpu_mem_gb", "cpu_percent", "ram_gb"]);
+const SYSTEM_KEYS = new Set(["gpu_util", "gpu_mem_gb", "cpu_percent", "ram_gb", "proc_ram_gb"]);
 const GROUP_SHORT: Record<string, string> = { train: "train", val: "val", eval: "éval" };
 
 const TPR_RE = /^tpr@([^_]+)(_mean)?$/;

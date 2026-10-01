@@ -45,8 +45,14 @@ def kind_label(kind: str) -> str:
     return KIND_LABELS.get(kind, (kind, False))[0]
 
 
-def _unknown_word(kind: str) -> str:
+def unknown_word(kind: str) -> str:
+    """French "inconnu" / "inconnue" matching the gender of the kind."""
     return "inconnue" if KIND_LABELS.get(kind, (kind, False))[1] else "inconnu"
+
+
+def none_word(kind: str) -> str:
+    """French "(aucun)" / "(aucune)" matching the gender of the kind."""
+    return "(aucune)" if KIND_LABELS.get(kind, (kind, False))[1] else "(aucun)"
 
 
 def normalize_modality(modality: str | Sequence[str] | None) -> tuple[str, ...] | None:
@@ -179,10 +185,10 @@ class Registry:
         if entry is not None:
             return entry
         close = difflib.get_close_matches(str(name), names, n=3, cutoff=0.5)
-        msg = f"{kind_label(self.kind)} {_unknown_word(self.kind)} '{name}'"
+        msg = f"{kind_label(self.kind)} {unknown_word(self.kind)} '{name}'"
         if close:
             msg += f" — vouliez-vous dire : {', '.join(close)} ?"
-        msg += f" — disponibles : {', '.join(names) if names else '(aucun)'}"
+        msg += f" — disponibles : {', '.join(names) if names else none_word(self.kind)}"
         raise UnknownComponentError(msg, kind=self.kind, name=str(name), suggestions=close)
 
     def has(self, name: str) -> bool:
@@ -486,3 +492,14 @@ def load_plugins(workspace: Path | None = None, *, include_builtins: bool = True
         _import_tree("lab", report)
         _last_report = report
         return report
+
+
+def reload_plugins(workspace: Path | None = None) -> PluginReport:
+    """Forget the imported ``lab`` modules (and their entries), then load the plugins again.
+
+    Use it after editing a file under ``lab/``: :func:`load_plugins` alone would keep the
+    already-imported version. Builtin components are untouched.
+    """
+    with _LOAD_LOCK:
+        _purge_lab_modules()
+        return load_plugins(workspace)

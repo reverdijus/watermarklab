@@ -25,6 +25,8 @@ DEFAULT_QUALITY_METRIC: dict[str, str] = {"image": "psnr", "audio": "snr", "vide
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 CONSTRAINT_RE = re.compile(rf"^\s*(>=|<=|==|>|<)\s*({_NUMBER})\s*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SSH_TARGET_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9._-]*$")
+REMOTE_PATH_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 Name = Annotated[str, Field(pattern=NAME_PATTERN)]
 
@@ -364,12 +366,25 @@ class ResourcesSpec(StrictModel):
 
 
 class InitFromSpec(StrictModel):
-    """Branch from a checkpoint of another run."""
+    """Branch from a checkpoint of another run — or resume it where it stopped.
+
+    ``resume: true`` continues the curriculum from the checkpoint's own step (optimizer state
+    loaded, no re-warmup); without it the plan restarts at ``start_phase`` (step 0 by default)
+    with the checkpoint's weights only.
+    """
 
     run: str = Field(min_length=1)
     checkpoint: str = "last"
     start_phase: str | int | None = None
     load_optimizer: bool = False
+    resume: bool = False
+
+    @model_validator(mode="after")
+    def _check_resume(self) -> "InitFromSpec":
+        if self.resume and self.start_phase is not None:
+            raise ValueError("'resume: true' reprend au step du checkpoint : 'start_phase' "
+                             "est incompatible (retirez l'un des deux)")
+        return self
 
 
 class ExperimentSpec(StrictModel):
@@ -383,7 +398,7 @@ class ExperimentSpec(StrictModel):
     data: DataSpec
     optimizer: OptimizerSpec = Field(default_factory=OptimizerSpec)
     loss: LossSpec
-    phases: list[PhaseSpec] = Field(min_length=1)
+    phases: list[PhaseSpec]  # [] = evaluation-only experiment (pretrained baseline)
     eval: EvalSpec = Field(default_factory=EvalSpec)
     checkpoint: CheckpointSpec = Field(default_factory=CheckpointSpec)
     samples: SamplesSpec = Field(default_factory=SamplesSpec)
@@ -407,6 +422,9 @@ class ExperimentSpec(StrictModel):
                 "'nbits' ne doit pas figurer dans model.params : il vient de "
                 "project.yaml (message_bits)"
             )
+        if not self.phases and self.init_from is not None:
+            raise ValueError("une expérience d'évaluation seule (phases: []) n'entraîne rien : "
+                             "init_from est sans objet (retirez-le ou ajoutez une phase)")
         return self
 
     @property
@@ -591,6 +609,24 @@ class BudgetSettings(StrictModel):
         return value
 
 
+class HostedSettings(StrictModel):
+    """Hosted mode (§12.1): central server following a git branch, team tokens."""
+
+    enabled: bool = False
+    git_branch: str = Field("main", min_length=1)
+    auto_pull_s: int = Field(60, ge=0)
+    auto_commit: bool = True
+    public_url: str | None = None
+
+    @field_validator("git_branch")
+    @classmethod
+    def _check_branch(cls, value: str) -> str:
+        if value.startswith("-") or REMOTE_PATH_FORBIDDEN_RE.search(value) or " " in value:
+            raise ValueError("nom de branche invalide (ni espace, ni '-' initial, ni caractère "
+                             "de contrôle)")
+        return value
+
+
 class WorkspaceSettings(StrictModel):
     """``workspace.yaml``."""
 
@@ -599,9 +635,17 @@ class WorkspaceSettings(StrictModel):
     data_dir: str = ".wmlab"
     sync_interval_s: int = Field(30, ge=1)
     default_host: str = "local"
+    hosted: HostedSettings = Field(default_factory=HostedSettings)
 
 
-# -- hosts (§5.7) ---------------------------------------------------------------------------
+# -- hosts (§5.7, §12.4) --------------------------------------------------------------------
+class ScalewayRef(StrictModel):
+    """Scaleway instance behind an SSH host (``zone`` + ``server_id``; never a secret)."""
+
+    zone: str = Field(pattern=r"^[a-z]{2}-[a-z]{3}-[0-9]$")
+    server_id: str = Field(pattern=r"^[A-Za-z0-9-]{8,64}$")
+
+
 class HostSpec(StrictModel):
     """A machine able to run jobs (the Mac itself or an SSH GPU server)."""
 
@@ -615,6 +659,32 @@ class HostSpec(StrictModel):
     gpu: str | None = None
     max_concurrent_jobs: int = Field(1, ge=1)
     notes: str | None = None
+    scaleway: ScalewayRef | None = None
+    decommissioned_at: str | None = None
+
+    @property
+    def decommissioned(self) -> bool:
+        return bool(self.decommissioned_at)
+
+    @field_validator("ssh_target")
+    @classmethod
+    def _check_target(cls, value: str | None) -> str | None:
+        # a free string would let ``-oProxyCommand=…`` reach ssh as an option
+        if value is not None and not SSH_TARGET_RE.match(value):
+            raise ValueError("'ssh_target' doit être de la forme [utilisateur@]hôte (lettres, "
+                             "chiffres, '.', '_' et '-' ; ex. root@51.15.0.1 ou un alias de "
+                             "~/.ssh/config)")
+        return value
+
+    @field_validator("workdir", "data_dir", "python")
+    @classmethod
+    def _check_remote_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not value.strip() or value.startswith("-") or REMOTE_PATH_FORBIDDEN_RE.search(value):
+            raise ValueError("chemin distant invalide : ni vide, ni commençant par '-', ni "
+                             "caractère de contrôle ou retour à la ligne")
+        return value
 
     @model_validator(mode="after")
     def _check_ssh(self) -> "HostSpec":

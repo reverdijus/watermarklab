@@ -2,10 +2,11 @@
 import clsx from "clsx";
 import { useState, type KeyboardEvent } from "react";
 import { Link } from "react-router";
-import { ArrowUpRight, Ban, Plus, RefreshCw, X } from "lucide-react";
+import { ArrowUpRight, Ban, Plus, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { Badge, IconButton, ProgressBar, StatusBadge, Tooltip, useConfirm, useToast } from "./ui";
 import { errorMessage } from "../lib/api";
 import { formatDuration, formatInt, formatPercent, formatRelative, shortId } from "../lib/format";
+import { describeRetrieveResult, hasRetrievalIssue, retrievalNotice } from "../lib/hosted";
 import { formatMetric, metricInfo, metricLabel } from "../lib/metrics";
 import { useCancelJob, useSyncJob } from "../lib/queries";
 import { isActiveStatus, JOB_KIND_LABELS, progressFraction, runEta, runPath, studyPath } from "../lib/runs";
@@ -24,7 +25,7 @@ export interface RunProgressProps {
   className?: string;
 }
 
-/** Overall progress bar with phase ticks (+ phase name and ETA when detailed). */
+/** Overall progress bar (+ phase dots, phase name and ETA when detailed). */
 export function RunProgress({ progress, status, detailed, run, className }: RunProgressProps) {
   const frac = progressFraction(progress);
   const eta = run ? runEta(run) : null;
@@ -34,8 +35,21 @@ export function RunProgress({ progress, status, detailed, run, className }: RunP
     <div className={clsx("min-w-0", className)}>
       {detailed && (
         <div className="mb-1.5 flex items-baseline justify-between gap-3 text-[12.5px]">
-          <span className="min-w-0 truncate text-muted">
-            Phase {progress.phase_index + 1}/{progress.n_phases} · <span className="text-fg">{progress.phase}</span>
+          <span className="flex min-w-0 items-center gap-2 text-muted">
+            <span className="flex shrink-0 items-center gap-1" aria-hidden>
+              {Array.from({ length: progress.n_phases }).map((_, i) => (
+                <span
+                  key={i}
+                  className={clsx(
+                    "h-1.5 w-1.5 rounded-full",
+                    i < progress.phase_index ? "bg-fg/40" : i === progress.phase_index ? "bg-accent" : "bg-border-strong",
+                  )}
+                />
+              ))}
+            </span>
+            <span className="truncate">
+              Phase {progress.phase_index + 1}/{progress.n_phases} · <span className="text-fg">{progress.phase}</span>
+            </span>
           </span>
           <span className="tabular shrink-0 text-muted">
             {formatInt(progress.step)} / {formatInt(progress.total_steps)}
@@ -43,16 +57,7 @@ export function RunProgress({ progress, status, detailed, run, className }: RunP
         </div>
       )}
       <div className="flex items-center gap-2">
-        <div className="relative min-w-0 flex-1">
-          <ProgressBar value={frac} tone={tone} size={detailed ? "sm" : "xs"} />
-          {progress.n_phases > 1 && (
-            <div className="pointer-events-none absolute inset-0 flex">
-              {Array.from({ length: progress.n_phases }).map((_, i) => (
-                <div key={i} className={clsx("flex-1", i > 0 && "border-l-2 border-surface")} />
-              ))}
-            </div>
-          )}
-        </div>
+        <ProgressBar value={frac} tone={tone} size={detailed ? "sm" : "xs"} className="min-w-0 flex-1" />
         {!detailed && <span className="tabular w-10 shrink-0 text-right text-[12px] text-muted">{frac == null ? "—" : formatPercent(frac, 0)}</span>}
       </div>
       {detailed && (
@@ -173,6 +178,7 @@ export function TagEditor({ tags, onChange, disabled, className }: TagEditorProp
 // ---------------------------------------------------------------------------
 
 function jobTarget(job: Job): string {
+  if (job.kind === "retrieve") return `Machine ${job.target}`;
   const base = job.target.split("/").pop() ?? job.target;
   return base.replace(/\.ya?ml$/, "");
 }
@@ -214,8 +220,10 @@ export function JobList({ jobs, empty, className }: { jobs: Job[]; empty?: strin
   return (
     <ul className={clsx("divide-y divide-border", className)}>
       {jobs.map((job) => {
-        const link = job.run_id ? runPath(job.run_id) : job.study_id ? studyPath(job.study_id) : null;
+        const link = job.run_id ? runPath(job.run_id) : job.study_id ? studyPath(job.study_id) : job.kind === "retrieve" ? "/hosts" : null;
         const active = isActiveStatus(job.status);
+        const retrievalIssue = hasRetrievalIssue(job) ? retrievalNotice(job.retrieval) : null;
+        const result = job.kind === "retrieve" && job.status === "completed" ? describeRetrieveResult(job.result) : "";
         return (
           <li key={job.job_id} className="flex items-center gap-3 py-2.5">
             <StatusBadge status={job.status} />
@@ -224,11 +232,20 @@ export function JobList({ jobs, empty, className }: { jobs: Job[]; empty?: strin
                 <span className="truncate">{jobTarget(job)}</span>
                 {job.smoke && <Badge tone="info">smoke</Badge>}
               </div>
-              <div className="truncate text-[12px] text-muted">
-                {JOB_KIND_LABELS[job.kind]} · {job.host} · {formatRelative(job.created_at)}
+              <div className="truncate text-[12px] text-muted" title={job.git_ref && job.git_sha ? `Révision ${job.git_ref} (${job.git_sha})` : undefined}>
+                {JOB_KIND_LABELS[job.kind] ?? job.kind} · {job.host} · {formatRelative(job.created_at)}
+                {job.user && ` · par ${job.user}`}
                 {job.run_id && <> · <span className="font-mono">{shortId(job.run_id)}</span></>}
+                {job.git_sha && <> · <span className="font-mono">{job.git_sha.slice(0, 7)}</span></>}
+                {result && ` · ${result}`}
                 {job.error && <span className="text-danger"> · {job.error}</span>}
               </div>
+              {retrievalIssue && (
+                <div className="mt-0.5 flex items-start gap-1 text-[12px] leading-snug text-warning" title={job.retrieval?.missing.join("\n")}>
+                  <TriangleAlert size={12} strokeWidth={2} className="mt-0.5 shrink-0" aria-hidden />
+                  <span className="line-clamp-2">{retrievalIssue}</span>
+                </div>
+              )}
             </div>
             <div className="flex shrink-0 items-center gap-0.5">
               {job.host !== "local" && (

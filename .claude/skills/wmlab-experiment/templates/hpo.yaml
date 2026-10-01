@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# GABARIT de plan HPO Watermark Lab (ARCHITECTURE.md §5.4).
+# À copier dans projects/<projet>/hpo/<nom>.yaml (ou :
+#   .venv/bin/python -m wmlab.cli new hpo <projet> <nom> --experiment <exp>).
+# Méthodologie : references/hpo-guide.md. Remplacer chaque « TODO ».
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/<projet>/hpo/<nom>.yaml
+# Essai    : .venv/bin/python -m wmlab.cli hpo projects/<projet>/hpo/<nom>.yaml --smoke
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: my_plan                        # TODO = nom du fichier sans .yaml
+experiment: baseline                 # TODO : expérience de base du MÊME projet
+description: "TODO : hyperparamètres scientifiques étudiés (et nuisances co-optimisées)"
+hypothesis: "TODO : ce que l'étude doit montrer (ex. LR optimal < 1e-3 ; +x pts de bit_acc_mean)"
+
+# Mono-objectif : tpe (défaut) ; peu de dimensions continues : cmaes ; multi-objectif : nsga2 ;
+# balayage exhaustif : grid (floats avec step) ; référence naïve : random.
+sampler: {name: tpe, params: {n_startup_trials: 8}}
+# asha (défaut) | hyperband | median | none — ignoré si plusieurs objectifs.
+pruner: {name: asha, params: {min_resource: 100, reduction_factor: 3}}
+
+objectives:                          # métriques de validation « val/... » uniquement
+  - {metric: val/bit_acc_mean, direction: maximize}
+constraints:                         # essais infaisables écartés du meilleur résultat
+  - {metric: val/psnr, op: ">=", value: 30}      # plus souple que le projet en basse fidélité
+
+space:                               # chemin pointé dans l'expérience → loi de tirage
+  optimizer.lr: {type: float, low: 1.0e-4, high: 3.0e-3, log: true}
+  phases.2.loss_weights.img: {type: float, low: 30.0, high: 1000.0, log: true}   # TODO : viser les poids des PHASES
+  model.params.channels: {type: categorical, choices: [32, 64]}
+  # phases.0.steps: {type: int, low: 100, high: 500, step: 100}
+
+fidelity:                            # proxy basse fidélité appliqué à chaque essai
+  steps_scale: 0.25                  # 25 % des steps de chaque phase (pas des warmup_steps)
+  overrides:
+    phases.0.lr.warmup_steps: 25     # réduire le warmup dans la même proportion (100 × 0,25)
+    eval.every_steps: 100            # assez de points pour le pruner
+    eval.final_benchmark: null       # pas de benchmark par essai
+
+budget: {max_trials: 24, max_hours: 3, max_eur: 20, parallel: 1}   # la 1re limite atteinte arrête l'étude
+objective_agg: last                  # last | best

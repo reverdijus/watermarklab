@@ -1579,6 +1579,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+baselines = [
+    { name = "torchvision" },
+]
 dev = [
     { name = "httpx" },
     { name = "pytest" },
@@ -1590,6 +1593,7 @@ quality = [
 ]
 server = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "optuna" },
     { name = "psutil" },
     { name = "uvicorn" },
@@ -1607,6 +1611,7 @@ requires-dist = [
     { name = "av", marker = "extra == 'train'", specifier = ">=13.0" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'server'", specifier = ">=0.27" },
     { name = "lpips", marker = "extra == 'quality'", specifier = ">=0.1.4" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "optuna", marker = "extra == 'server'", specifier = ">=4.1" },
@@ -1620,8 +1625,9 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.7" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.5" },
+    { name = "torchvision", marker = "extra == 'baselines'", specifier = ">=0.20" },
     { name = "torchvision", marker = "extra == 'quality'", specifier = ">=0.20" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.32" },
 ]
-provides-extras = ["train", "server", "quality", "dev"]
+provides-extras = ["train", "server", "quality", "baselines", "dev"]

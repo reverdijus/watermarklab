@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « invismark » — projet image-baselines (image, 32 bits) — ÉVALUATION SEULE
+# InvisMark (Microsoft, WACV 2025) — code MIT, poids : miroir Hugging Face non officiel —
+# 100 bits dont 6 figés par l'entraînement sur des UUID (bits 48-51 et 64-65 : 94 utiles).
+# Poids officiels : invismark_paper
+# Hors dépôt, dans .wmlab/weights/ (une fois par machine) :
+#   .venv/bin/python -m wmlab.cli weights pull invismark_paper
+# (ou « download: true » ci-dessous : téléchargement automatique au lancement du run).
+# À 32 bits, la charge utile occupe les positions 0-31 : les bits figés n'en font pas partie
+# (uuid_payload est sans effet ici ; il compte dès que message_bits > 48).
+#
+# phases: [] ⇒ aucun entraînement : validation au step 0, échantillons, checkpoint de référence
+# (les poids ne sont pas recopiés dans le run : sha256 du fichier officiel) puis benchmark.
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/image-baselines/experiments/invismark.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/image-baselines/experiments/invismark.yaml --smoke
+# Lancer   : app → « Nouveau lancement » → image-baselines → invismark → machine « local »
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: invismark
+description: "InvisMark (checkpoint du papier) évalué tel quel sur 32 bits"
+hypothesis: >-
+  PSNR ≥ 48 dB (papier : 51 dB) et bit_acc ≈ 1 sans attaque sur les 32 premiers bits (hors
+  bits figés) ; robuste au JPEG q80 et à la luminosité, moins robuste que Video Seal au flou
+  σ = 2 et au bruit σ = 0,06 (compromis orienté qualité).
+seed: 0
+
+model:
+  name: invismark
+  params:
+    uuid_payload: false              # true : force les 6 bits figés des UUID et les retire du message
+    download: false                  # true : télécharge les poids s'ils manquent (1,2 Go)
+
+# Données : `train` n'est pas utilisé (aucune phase) mais reste obligatoire dans le format.
+# Synthétique, comme le benchmark image_v1 : chiffres indicatifs (les modèles officiels sont
+# entraînés sur des photos). Pour des chiffres publiables : benchmark image_v2 sur DIV2K.
+data:
+  train:
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 64, seed: 0}
+  val:
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 64, seed: 1}
+  batch_size: 16
+  num_workers: 0
+
+# Pertes : seulement pour val/loss (rien n'est optimisé).
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}
+    img: {name: mse, weight: 100.0}
+
+phases: []                           # évaluation seule : les poids officiels ne bougent pas
+
+eval:
+  val_batches: 4                     # 4 × 16 = les 64 images de validation
+  val_attacks:                       # mêmes attaques de validation que image-hidden/baseline
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+    - {label: crop50, name: crop, params: {area: 0.5}}
+  final_benchmark: {benchmark: image_v1, checkpoints: [last]}
+
+checkpoint: {every_steps: null, keep_last: 1, keep_best: {}, at_phase_end: false}
+samples: {every_steps: null, count: 4}   # original / tatoué / différence ×10 dans l'app
+resources: {device: auto, precision: fp32, compile: false}   # fp32 : comme l'inférence officielle
+tags: [baseline, pretrained, microsoft]

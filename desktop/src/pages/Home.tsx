@@ -23,8 +23,10 @@ import { formatEur, formatHours, formatRelative, plural, shortId } from "../lib/
 import { useNow } from "../lib/hooks";
 import { formatMetric, metricLabel, pickKeyMetrics, qualityMetricFor } from "../lib/metrics";
 import { useOverview } from "../lib/queries";
-import { MODALITY_LABELS, projectPath, runPath } from "../lib/runs";
+import { isPrunedTrial, MODALITY_LABELS, projectPath, runPath } from "../lib/runs";
 import type { ProjectSummary, RunSummary } from "../lib/types";
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 function greeting(date: Date): string {
   const h = date.getHours();
@@ -50,7 +52,7 @@ function RunningCard({ run }: { run: RunSummary }) {
             {run.project} · <span className="font-mono">{shortId(run.run_id)}</span> · {run.host}
           </div>
         </div>
-        <StatusBadge status={run.status} />
+        <StatusBadge status={run.status} pruned={isPrunedTrial(run)} />
       </div>
       <RunProgress progress={run.progress} status={run.status} run={run} detailed className="mt-4" />
       <div className="mt-3 flex items-end justify-between gap-3">
@@ -116,14 +118,17 @@ export default function Home() {
   const data = overview.data;
 
   const recentColumns: Column<RunSummary>[] = [
-    { id: "status", header: "", width: 28, cell: (r) => <StatusBadge status={r.status} dotOnly /> },
+    { id: "status", header: "", width: 28, cell: (r) => <StatusBadge status={r.status} dotOnly pruned={isPrunedTrial(r)} /> },
     {
       id: "run",
       header: "Run",
       cell: (r) => (
         <div className="min-w-0">
           <div className="truncate text-fg">{r.experiment}</div>
-          <div className="truncate text-[11.5px] text-muted">{r.project}</div>
+          <div className="truncate text-[11.5px] text-muted">
+            {r.project}
+            {r.user && ` · par ${r.user}`}
+          </div>
         </div>
       ),
     },
@@ -153,7 +158,7 @@ export default function Home() {
   return (
     <Page>
       <PageHeader
-        eyebrow={new Intl.DateTimeFormat("fr-FR", { weekday: "long", day: "numeric", month: "long" }).format(new Date(now))}
+        eyebrow={capitalize(new Intl.DateTimeFormat("fr-FR", { weekday: "long", day: "numeric", month: "long" }).format(new Date(now)))}
         title={greeting(new Date(now))}
         description={data ? data.workspace.name : undefined}
         actions={
@@ -219,7 +224,7 @@ export default function Home() {
           icon={FlaskConical}
           label="Études HPO"
           value={data?.counts.studies ?? "—"}
-          sub="plans d'optimisation lancés"
+          sub={data ? plural(data.counts.studies, "plan d'optimisation lancé", "plans d'optimisation lancés", "aucun plan lancé") : undefined}
           loading={overview.isLoading}
         />
       </div>

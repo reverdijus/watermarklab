@@ -1,7 +1,7 @@
 import clsx from "clsx";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { CircleAlert, FlaskConical, GitBranch, Microscope, Plus, Rocket, Trash, Zap } from "lucide-react";
+import { CircleAlert, FlaskConical, GitBranch, GitCommitHorizontal, Microscope, Plus, Rocket, Trash, TriangleAlert, Zap } from "lucide-react";
 import {
   Button,
   Callout,
@@ -21,10 +21,12 @@ import { PhaseTimeline } from "../PhaseTimeline";
 import { errorMessage } from "../../lib/api";
 import { formatEur, formatHours, formatInt, formatRelative, shortId } from "../../lib/format";
 import { useHotkey } from "../../lib/hooks";
+import { gitRefForLaunch, gitRevisionLabel } from "../../lib/hosted";
 import {
   useBenchmarks,
   useCreateJob,
   useExperimentPlan,
+  useGit,
   useHosts,
   useJobEstimate,
   useProject,
@@ -33,7 +35,7 @@ import {
   useRuns,
   useSettings,
 } from "../../lib/queries";
-import { runPath, studyPath, STATUS_LABELS } from "../../lib/runs";
+import { runPath, runStatusLabel, studyPath } from "../../lib/runs";
 import type { Checkpoint, CreateJobBody, EstimateBody } from "../../lib/types";
 import type { LaunchKind, LaunchPreset } from "./LaunchProvider";
 
@@ -91,10 +93,14 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
   const [initRun, setInitRun] = useState(preset.initFrom?.run ?? "");
   const [initCheckpoint, setInitCheckpoint] = useState(preset.initFrom?.checkpoint ?? "last");
   const [startPhase, setStartPhase] = useState(preset.initFrom?.start_phase != null ? String(preset.initFrom.start_phase) : "");
+  const [resume, setResume] = useState(!!preset.initFrom?.resume);
   const [evalRun, setEvalRun] = useState(preset.evalRun ?? "");
   const [evalCheckpoint, setEvalCheckpoint] = useState(preset.evalCheckpoint ?? "last");
   const [benchmark, setBenchmark] = useState(preset.benchmark ?? "");
   const [formError, setFormError] = useState<string | null>(null);
+  // "Révision git" (§12.3): pre-filled with `branch @ short_sha` once /api/git answered.
+  const [gitRef, setGitRef] = useState("");
+  const [gitRefTouched, setGitRefTouched] = useState(false);
 
   const projects = useProjects();
   const projectDetail = useProject(project || null);
@@ -102,6 +108,12 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
   const settings = useSettings();
   const benchmarks = useBenchmarks();
   const createJob = useCreateJob();
+  const git = useGit();
+  const gitLabel = gitRevisionLabel(git.data);
+  useEffect(() => {
+    if (!gitRefTouched && gitLabel) setGitRef(gitLabel);
+  }, [gitLabel, gitRefTouched]);
+  const gitAvailable = !!git.data?.available;
 
   // Run whose detail we need (to list checkpoints): eval target or branch source.
   const presetRunDetail = useRun(preset.evalRun ?? preset.initFrom?.run ?? null);
@@ -117,12 +129,15 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
     else if (projects.data?.length && !preset.evalRun && !preset.initFrom) setProject(projects.data[0].name);
   }, [project, projects.data, presetRunDetail.data, preset.evalRun, preset.initFrom]);
 
-  // Default host: workspace default_host, else first host.
+  // Default host: workspace default_host, else first (non-retired) host.
   useEffect(() => {
-    if (host || !hosts.data?.length) return;
+    // Wait for the workspace settings (default_host) unless they failed to load.
+    if (host || !hosts.data?.length || settings.isPending) return;
+    const usable = hosts.data.filter((h) => !h.decommissioned_at);
+    if (!usable.length) return;
     const def = settings.data?.default_host;
-    setHost(def && hosts.data.some((h) => h.name === def) ? def : hosts.data[0].name);
-  }, [host, hosts.data, settings.data]);
+    setHost(def && usable.some((h) => h.name === def) ? def : usable[0].name);
+  }, [host, hosts.data, settings.data, settings.isPending]);
 
   const experiments = projectDetail.data?.experiments ?? [];
   const plans = projectDetail.data?.hpo_plans ?? [];
@@ -160,13 +175,13 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
 
   // Suggest the phase following a "phase_end:<x>" checkpoint.
   useEffect(() => {
-    if (!branch || startPhase) return;
+    if (!branch || resume || startPhase) return;
     const m = /^phase_end:(.+)$/.exec(initCheckpoint);
     if (m && phaseNames.length) {
       const idx = phaseNames.indexOf(m[1]);
       if (idx >= 0 && idx + 1 < phaseNames.length) setStartPhase(phaseNames[idx + 1]);
     }
-  }, [branch, initCheckpoint, phaseNames, startPhase]);
+  }, [branch, resume, initCheckpoint, phaseNames, startPhase]);
 
   const cleanOverrides = useMemo(() => {
     const out: Record<string, string> = {};
@@ -175,17 +190,18 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
   }, [overrides]);
 
   const specPath = kind === "train" ? selectedExperiment?.path : kind === "hpo" ? selectedPlan?.path : undefined;
-  const estimateBody: EstimateBody | null =
-    specPath && host && kind !== "eval"
-      ? { spec_path: specPath, host, overrides: kind === "train" ? cleanOverrides : undefined }
-      : null;
+  // The estimate describes the full run: a smoke run (≤ 6 steps per phase) is not estimated.
+  const estimateBody = useMemo<EstimateBody | null>(
+    () => (specPath && host && kind !== "eval" && !smoke ? { spec_path: specPath, host, overrides: cleanOverrides } : null),
+    [specPath, host, kind, cleanOverrides, smoke],
+  );
   const estimate = useJobEstimate(estimateBody);
 
   const runOptions = useMemo<SelectOption[]>(
     () =>
       (runs.data ?? []).map((r) => ({
         value: r.run_id,
-        label: `${shortId(r.run_id)} · ${r.experiment} · ${STATUS_LABELS[r.status]} · ${formatRelative(r.created_at)}`,
+        label: `${shortId(r.run_id)} · ${r.experiment} · ${runStatusLabel(r)} · ${formatRelative(r.created_at)}`,
       })),
     [runs.data],
   );
@@ -193,10 +209,13 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
     current && !opts.some((o) => o.value === current) ? [{ value: current, label: current }, ...opts] : opts;
   const ckptOptions = useMemo(() => checkpointOptions(sourceRun.data?.checkpoints ?? []), [sourceRun.data]);
 
-  const hostOptions = (hosts.data ?? []).map((h) => ({
-    value: h.name,
-    label: `${h.name}${h.gpu ? ` · ${h.gpu}` : ""} · ${h.price_eur_per_hour > 0 ? `${formatEur(h.price_eur_per_hour)}/h` : "gratuit"}`,
-  }));
+  // Retired machines (§12.4) are no longer offered.
+  const hostOptions = (hosts.data ?? [])
+    .filter((h) => !h.decommissioned_at)
+    .map((h) => ({
+      value: h.name,
+      label: `${h.name}${h.gpu ? ` · ${h.gpu}` : ""} · ${h.price_eur_per_hour > 0 ? `${formatEur(h.price_eur_per_hour)}/h` : "gratuit"}`,
+    }));
 
   const validate = (): string | null => {
     if (!project) return "Choisissez un projet.";
@@ -212,6 +231,7 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
     if (kind === "hpo") {
       if (!selectedPlan) return "Choisissez un plan HPO.";
       if (!selectedPlan.valid) return "Le plan HPO sélectionné n'est pas valide.";
+      if (overrides.some((r) => !r.key.trim() && r.value.trim())) return "Chaque override doit avoir une clé.";
     }
     if (kind === "eval") {
       if (!evalRun) return "Choisissez le run à évaluer.";
@@ -221,11 +241,70 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
     return null;
   };
 
+  const overridesField = (
+    <Field
+      label="Overrides"
+      hint={
+        kind === "hpo"
+          ? "Appliqués à l'expérience de base de chaque essai (avant l'espace de recherche), ex. data.batch_size = 16."
+          : "Chemins pointés de la spec, ex. optimizer.lr = 3e-4 ou phases.1.steps = 5000."
+      }
+    >
+      <div className="space-y-2">
+        {overrides.map((row) => (
+          <div key={row.id} className="flex items-center gap-2">
+            <Input
+              size="sm"
+              mono
+              placeholder="optimizer.lr"
+              value={row.key}
+              className="flex-1"
+              onChange={(e) =>
+                setOverrides((list) => list.map((r) => (r.id === row.id ? { ...r, key: e.target.value } : r)))
+              }
+            />
+            <span className="text-muted">=</span>
+            <Input
+              size="sm"
+              mono
+              placeholder="3e-4"
+              value={row.value}
+              className="flex-1"
+              onChange={(e) =>
+                setOverrides((list) => list.map((r) => (r.id === row.id ? { ...r, value: e.target.value } : r)))
+              }
+            />
+            <IconButton
+              icon={Trash}
+              label="Retirer"
+              size="sm"
+              onClick={() => setOverrides((list) => list.filter((r) => r.id !== row.id))}
+            />
+          </div>
+        ))}
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={Plus}
+          onClick={() => setOverrides((list) => [...list, { id: ++rowSeq, key: "", value: "" }])}
+        >
+          Ajouter un override
+        </Button>
+      </div>
+    </Field>
+  );
+
+  // One job per submission: ⌘↵ (or a double click) while the request is in flight must not
+  // create a second job (two full trainings billed on a GPU host).
+  const submittingRef = useRef(false);
   const submit = async () => {
+    if (submittingRef.current || createJob.isPending) return;
     const problem = validate();
     setFormError(problem);
     if (problem) return;
+    submittingRef.current = true;
     const mh = maxHours.trim() ? Number(maxHours.replace(",", ".")) : null;
+    const gitRefValue = gitAvailable ? gitRefForLaunch(gitRef, gitLabel, git.data) : undefined;
     let body: CreateJobBody;
     if (kind === "train") {
       body = {
@@ -239,15 +318,18 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
           ? {
               run: initRun,
               checkpoint: initCheckpoint,
-              start_phase: startPhase === "" ? null : /^\d+$/.test(startPhase) ? Number(startPhase) : startPhase,
+              start_phase: resume || startPhase === "" ? null : /^\d+$/.test(startPhase) ? Number(startPhase) : startPhase,
+              ...(resume ? { resume: true } : {}),
             }
           : undefined,
       };
     } else if (kind === "hpo") {
-      body = { kind, host, spec_path: selectedPlan!.path, max_hours: mh, smoke };
+      // Overrides apply to the base experiment of every trial; max_hours caps the study budget.
+      body = { kind, host, spec_path: selectedPlan!.path, overrides: cleanOverrides, max_hours: mh, smoke };
     } else {
       body = { kind, host, run_id: evalRun, checkpoint: evalCheckpoint, benchmark, smoke };
     }
+    if (gitRefValue) body.git_ref = gitRefValue;
     try {
       const job = await createJob.mutateAsync(body);
       onClose();
@@ -266,10 +348,12 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
       }
     } catch (err) {
       setFormError(errorMessage(err));
+    } finally {
+      submittingRef.current = false;
     }
   };
 
-  useHotkey("mod+enter", () => void submit(), { allowInInputs: true });
+  useHotkey("mod+enter", () => void submit(), { allowInInputs: true, enabled: !createJob.isPending });
 
   const noProjects = projects.isSuccess && projects.data.length === 0;
 
@@ -341,6 +425,45 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
           />
         </div>
 
+        {gitAvailable && (
+          <div className="space-y-2">
+            <Input
+              label={
+                <span className="inline-flex items-center gap-1.5">
+                  <GitCommitHorizontal size={14} strokeWidth={1.75} aria-hidden /> Révision git
+                </span>
+              }
+              mono
+              size="sm"
+              value={gitRef}
+              onChange={(e) => {
+                setGitRef(e.target.value);
+                setGitRefTouched(true);
+              }}
+              placeholder={gitLabel || "main"}
+              spellCheck={false}
+              hint={
+                git.data?.hosted
+                  ? "Nom de branche ou sha exporté sur la machine (git archive). Poussez votre branche, puis indiquez son nom ou un sha."
+                  : "Nom de branche ou sha ; laissée telle quelle, la révision courante du workspace est synchronisée."
+              }
+            />
+            {git.data?.dirty && !git.data.hosted && (
+              <Callout tone="warning" icon={TriangleAlert} title="Modifications non commitées">
+                Le dépôt contient des changements non commités : la révision affichée ne les reflète pas. Sans révision explicite, le
+                workspace est synchronisé tel quel (modifications incluses, diff enregistré avec le run) ; une révision explicite exporte un
+                commit propre.
+              </Callout>
+            )}
+            {git.data?.hosted && git.data.behind != null && git.data.behind > 0 && (
+              <div className="text-[12px] text-muted">
+                Le serveur a {git.data.behind} commit{git.data.behind > 1 ? "s" : ""} de retard sur le dépôt distant : un nom de branche est
+                résolu après le prochain pull (Réglages → Tirer maintenant).
+              </div>
+            )}
+          </div>
+        )}
+
         {kind === "train" && (
           <>
             <Field
@@ -375,49 +498,7 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
               </div>
             )}
 
-            <Field label="Overrides" hint="Chemins pointés de la spec, ex. optimizer.lr = 3e-4 ou phases.1.steps = 5000.">
-              <div className="space-y-2">
-                {overrides.map((row) => (
-                  <div key={row.id} className="flex items-center gap-2">
-                    <Input
-                      size="sm"
-                      mono
-                      placeholder="optimizer.lr"
-                      value={row.key}
-                      className="flex-1"
-                      onChange={(e) =>
-                        setOverrides((list) => list.map((r) => (r.id === row.id ? { ...r, key: e.target.value } : r)))
-                      }
-                    />
-                    <span className="text-muted">=</span>
-                    <Input
-                      size="sm"
-                      mono
-                      placeholder="3e-4"
-                      value={row.value}
-                      className="flex-1"
-                      onChange={(e) =>
-                        setOverrides((list) => list.map((r) => (r.id === row.id ? { ...r, value: e.target.value } : r)))
-                      }
-                    />
-                    <IconButton
-                      icon={Trash}
-                      label="Retirer"
-                      size="sm"
-                      onClick={() => setOverrides((list) => list.filter((r) => r.id !== row.id))}
-                    />
-                  </div>
-                ))}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  icon={Plus}
-                  onClick={() => setOverrides((list) => [...list, { id: ++rowSeq, key: "", value: "" }])}
-                >
-                  Ajouter un override
-                </Button>
-              </div>
-            </Field>
+            {overridesField}
 
             <div className="rounded-xl border border-border px-4 py-3">
               <Switch
@@ -457,15 +538,26 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
                   <Select
                     label="Phase de départ"
                     size="sm"
-                    value={startPhase}
+                    value={resume ? "" : startPhase}
                     onChange={setStartPhase}
-                    placeholder="Première phase"
+                    placeholder={resume ? "Phase du checkpoint" : "Première phase"}
+                    disabled={resume}
                     options={withCurrent(
                       phaseNames.map((n, i) => ({ value: n, label: `${i + 1}. ${n}` })),
-                      startPhase,
+                      resume ? "" : startPhase,
                     )}
                   />
                 </div>
+              )}
+              {branch && (
+                <Switch
+                  className="mt-3"
+                  size="sm"
+                  checked={resume}
+                  onChange={setResume}
+                  label="Reprendre au step du checkpoint (resume)"
+                  description="Restaure l'optimiseur et reprend la phase en cours au step enregistré, au lieu de rejouer le curriculum depuis la phase de départ."
+                />
               )}
             </div>
           </>
@@ -488,6 +580,7 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
             />
           </Field>
         )}
+        {kind === "hpo" && overridesField}
 
         {kind === "eval" && (
           <div className="grid grid-cols-3 gap-3">
@@ -540,7 +633,15 @@ export function LaunchDialog({ preset, onClose }: LaunchDialogProps) {
           )}
         </div>
 
-        {kind !== "eval" && estimateBody && (
+        {kind !== "eval" && smoke && (
+          <Callout tone="info" icon={Zap} title="Essai éclair">
+            {kind === "hpo"
+              ? "3 essais en mode smoke : données synthétiques, au plus 6 steps par phase — quelques secondes, coût négligeable. L'estimation du plan complet ne s'applique pas."
+              : "Données synthétiques, au plus 6 steps par phase — quelques secondes, coût négligeable. L'estimation du run complet ne s'applique pas."}
+          </Callout>
+        )}
+
+        {kind !== "eval" && !smoke && estimateBody && (
           <div className={clsx("grid grid-cols-3 gap-3 rounded-xl bg-surface-2 px-4 py-3")}>
             <EstimateCell label="Steps" value={estimate.data ? formatInt(estimate.data.total_steps) : null} loading={estimate.isLoading} />
             <EstimateCell

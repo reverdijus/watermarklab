@@ -1,0 +1,30 @@
+# Watermark Lab — backend en mode hébergé (ARCHITECTURE.md §12.7).
+# Installé par deploy/install_server.sh dans /etc/systemd/system/ ; les marqueurs
+# __WMLAB_DIR__ / __WMLAB_USER__ / __WMLAB_PORT__ sont remplacés à l'installation.
+[Unit]
+Description=Watermark Lab — backend (mode hébergé)
+Documentation=file:__WMLAB_DIR__/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__WMLAB_USER__
+Group=__WMLAB_USER__
+WorkingDirectory=__WMLAB_DIR__
+# WMLAB_WORKSPACE, WMLAB_TOKEN (jeton serveur, admin implicite), SCW_SECRET_KEY (facultatif).
+EnvironmentFile=/etc/wmlab/env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__WMLAB_DIR__/.venv/bin/python -m wmlab.cli server --port __WMLAB_PORT__ --host 127.0.0.1 --workspace __WMLAB_DIR__
+Restart=always
+RestartSec=3
+# Ne tue que le backend : les jobs lancés par l'app (rsync de rapatriement, entraînement
+# local) survivent à un redémarrage du service et sont rattachés au démarrage suivant.
+KillMode=process
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

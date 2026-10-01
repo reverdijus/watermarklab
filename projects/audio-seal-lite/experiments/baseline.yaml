@@ -1,0 +1,119 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « baseline » — projet audio-seal-lite (audio, 16 bits)
+# Format : ARCHITECTURE.md §5.3 · exemple de RÉFÉRENCE audio
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/audio-seal-lite/experiments/baseline.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/audio-seal-lite/experiments/baseline.yaml --smoke
+#
+# Tenseurs audio : [B, 1, T] float32 dans [-1, 1], mono. Ici T = 16 000 (1 s à 16 kHz).
+# Tailles choisies pour le Mac (~20 min mesurées avec 3 runs en parallèle, moins seul).
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: baseline
+description: "audio_conv + curriculum 3 phases : décodage propre → rampe d'attaques audio → affinage avec codecs réels"
+hypothesis: >-
+  Un warmup de décodage pur puis une rampe progressive (bruit, filtres, écho, décalage,
+  rééchantillonnage) et un affinage avec MP3/AAC réels (straight-through) donnent
+  val/bit_acc_mean ≥ 0,9 avec un SNR ≥ 25 dB (repère mesuré sur Mac M4 en 1 500 steps
+  synthétiques : SNR ~32 dB, bit_acc_mean ~0,97).
+seed: 0
+
+# ── Architecture ─────────────────────────────────────────────────────────────────────────────
+model:
+  name: audio_conv                   # encodeur résiduel 1D + détecteur conv 1D
+  params:
+    channels: 16                     # largeur : 16 sur le Mac (~4× plus rapide), 32–64 sur GPU
+    blocks: 4                        # blocs résiduels
+    strength: 1.0                    # amplitude du résidu : ↑ robustesse, ↓ SNR
+
+# ── Données ─────────────────────────────────────────────────────────────────────────────────
+# Synthétique par défaut : mélanges de sinusoïdes + bruit, déterministes (aucun téléchargement).
+data:
+  train:
+    dataset: synthetic
+    params: {modality: audio, length: 16000, num_items: 2048, seed: 0}
+    preprocess:
+      - {name: normalize_peak, params: {peak: 0.5}}   # crête à 0,5 : marge pour le gain aléatoire
+      - {name: random_gain, params: {db: 6}}          # augmentation : gain aléatoire ±6 dB
+    # ── Parole réelle (LibriSpeech) : remplacer dataset/params par
+    # dataset: audio_folder
+    # params: {root: "@librispeech_clean100", sample_rate: 16000, clip_seconds: 1.0}
+    # (musique : root: "@fma_small" ; parole bruitée : root: "@voxpopuli_en")
+  val:
+    dataset: synthetic
+    params: {modality: audio, length: 16000, num_items: 128, seed: 1}
+    preprocess:
+      - {name: normalize_peak, params: {peak: 0.5}}   # déterministe : autorisé en validation
+  batch_size: 16
+  num_workers: 2
+  sample_rate: 16000                 # transmis aux attaques/pertes/métriques (extras.sample_rate)
+
+optimizer: {name: adamw, lr: 1.0e-3, weight_decay: 1.0e-4, betas: [0.9, 0.999], grad_clip: 1.0}
+
+# ── Pertes ──────────────────────────────────────────────────────────────────────────────────
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}   # décodage du message
+    wav: {name: mse, weight: 1.0}           # fidélité de la forme d'onde
+    spec: {name: stft, weight: 1.0}         # fidélité spectrale multi-résolution (perceptuellement plus juste)
+
+# ── Curriculum (1 500 steps) ────────────────────────────────────────────────────────────────
+phases:
+  # Décodage seul : AUCUNE contrainte de qualité. Mesuré : avec {wav: 0.1, spec: 0.1}, la
+  # perte STFT (normalisée, donc forte même pour un résidu minuscule) empêche le détecteur
+  # de décoller et bit_acc reste à 0,5 ; à 0, il atteint ~0,99 en 300 steps (SNR très bas,
+  # remonté ensuite par la rampe).
+  - name: warmup_decode
+    steps: 300
+    lr: {schedule: linear_warmup, warmup_steps: 100}
+    loss_weights: {wav: 0.0, spec: 0.0}
+    attacks: []
+
+  - name: robustness_ramp                   # attaques différentiables de plus en plus fortes
+    steps: 900
+    lr: {schedule: constant}
+    loss_weights:
+      wav: {ramp: [0.1, 1.0]}
+      spec: {ramp: [0.1, 1.0]}
+    attacks:
+      - {name: identity, p: 0.5}
+      - {name: gaussian_noise, params: {snr_db: 20}}
+      - {name: lowpass, params: {cutoff_hz: 3000}}
+      - {name: highpass, params: {cutoff_hz: 500}}
+      - {name: amplitude, params: {gain_db: -6}}
+      - {name: echo, params: {delay_ms: 100, decay: 0.3}}
+      - {name: time_shift, params: {max_ms: 50}}
+      - {name: resample, params: {rate: 8000}}
+    attack_strength: {ramp: [0.0, 1.0]}
+
+  - name: finetune_imperceptibility         # qualité ↑ + codecs réels (non différentiables ⇒ STE)
+    steps: 300
+    lr: {schedule: cosine, min_factor: 0.01}
+    loss_weights: {wav: 2.0, spec: 2.0}
+    attacks:
+      - {name: mp3, params: {bitrate_kbps: 64}}
+      - {name: aac, params: {bitrate_kbps: 64}}
+      - {name: gaussian_noise, params: {snr_db: 20}}
+      - {name: lowpass, params: {cutoff_hz: 3000}}
+    attack_strength: 1.0
+
+# ── Validation ──────────────────────────────────────────────────────────────────────────────
+eval:
+  every_steps: 250
+  val_batches: 8                     # 8 × 16 = les 128 clips de validation
+  val_attacks:
+    - {label: noise20, name: gaussian_noise, params: {snr_db: 20}}
+    - {label: lowpass3k, name: lowpass, params: {cutoff_hz: 3000}}
+    - {label: echo, name: echo, params: {delay_ms: 100, decay: 0.3}}
+    - {label: mp3_64k, name: mp3, params: {bitrate_kbps: 64}}
+  final_benchmark: {benchmark: audio_v2, checkpoints: [last]}   # v2 : FPR atteignables avec 16 bits
+
+checkpoint:
+  every_steps: 500
+  keep_last: 2
+  keep_best: {"val/bit_acc_mean": max, "val/snr": max}
+  at_phase_end: true
+
+samples: {every_steps: 500, count: 4}   # fichiers .wav original / tatoué / résidu ×10, écoutables dans l'app
+resources: {device: auto, precision: auto, compile: false}
+init_from: null
+tags: [baseline]

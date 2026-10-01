@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « baseline » — projet video-framewise (vidéo, 32 bits)
+# Format : ARCHITECTURE.md §5.3 · exemple de RÉFÉRENCE vidéo
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/video-framewise/experiments/baseline.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/video-framewise/experiments/baseline.yaml --smoke
+#
+# Tenseurs vidéo : [B, F, 3, H, W] float32 dans [0, 1]. Ici 8 frames de 64×64 à 24 fps.
+# Coût d'un step ≈ celui d'un batch image de B×F images : garder B×F raisonnable sur le Mac.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: baseline
+description: "video_framewise(hidden) + curriculum 3 phases : JPEG par frame, H.264 et pertes de frames ; perte temporelle"
+hypothesis: >-
+  Un modèle image appliqué frame par frame, avec agrégation des logits sur 8 frames et une
+  perte de cohérence temporelle, dépasse 36 dB de PSNR en gardant val/bit_acc_mean ≥ 0,7
+  (H.264 inclus) sans scintillement visible — en 1 200 steps synthétiques (repère Mac M4 :
+  ~39 dB, ~0,73).
+seed: 0
+
+# ── Architecture ─────────────────────────────────────────────────────────────────────────────
+# video_framewise enveloppe un modèle IMAGE du registre (image_model + image_params) : chaque
+# frame est tatouée avec le même message ; les logits des frames sont agrégés (mean).
+model:
+  name: video_framewise
+  params:
+    image_model: hidden
+    image_params: {channels: 32, enc_blocks: 4, dec_blocks: 7, strength: 1.0}
+    aggregate: mean                  # agrégation des logits par frame
+
+# ── Données ─────────────────────────────────────────────────────────────────────────────────
+data:
+  train:
+    dataset: synthetic               # formes en mouvement, déterministes
+    params: {modality: video, size: 64, frames: 8, num_items: 1024, seed: 0}
+    preprocess: []
+    # ── Vidéos réelles (SA-V) : remplacer dataset/params/preprocess par
+    # dataset: video_folder
+    # params: {root: "@sav", frames: 16, size: 64}
+    # preprocess: [{name: temporal_crop, params: {frames: 8}}]   # 8 frames tirées au hasard parmi 16
+  val:
+    dataset: synthetic
+    params: {modality: video, size: 64, frames: 8, num_items: 64, seed: 1}
+    preprocess: []
+  batch_size: 8                      # 8 clips × 8 frames = 64 images par step
+  num_workers: 2
+  fps: 24                            # transmis aux attaques (h264) et aux échantillons .mp4
+
+optimizer: {name: adamw, lr: 1.0e-3, weight_decay: 1.0e-4, betas: [0.9, 0.999], grad_clip: 1.0}
+
+# ── Pertes ──────────────────────────────────────────────────────────────────────────────────
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}   # décodage du message (logits agrégés)
+    vid: {name: mse, weight: 100.0}         # imperceptibilité par frame (MSE minuscule ⇒ poids ~100)
+    temp: {name: temporal, weight: 0.2}     # cohérence temporelle du résidu (anti-scintillement)
+
+# ── Curriculum (1 200 steps) ────────────────────────────────────────────────────────────────
+phases:
+  - name: warmup_decode
+    steps: 200
+    lr: {schedule: linear_warmup, warmup_steps: 100}
+    loss_weights: {vid: 0.1, temp: 0.05}
+    attacks: []
+
+  - name: robustness_ramp
+    steps: 700
+    lr: {schedule: constant}
+    loss_weights:
+      vid: {ramp: [0.1, 100.0]}
+      temp: {ramp: [0.05, 0.2]}
+    attacks:
+      - {name: identity, p: 0.5}
+      # JPEG par frame : version différentiable pendant l'entraînement (le vrai JPEG est
+      # utilisé en validation et dans le benchmark).
+      - {name: framewise, params: {attack: jpeg_diff, params: {quality: 50}}}
+      - {name: h264, params: {crf: 28}}             # codec réel (non différentiable ⇒ STE automatique)
+      - {name: frame_drop, params: {p: 0.2}}        # frames remplacées par la précédente
+    attack_strength: {ramp: [0.0, 1.0]}
+
+  - name: finetune_imperceptibility
+    steps: 300
+    lr: {schedule: cosine, min_factor: 0.01}
+    loss_weights: {vid: 300.0, temp: 0.5}
+    attacks:
+      - {name: framewise, params: {attack: jpeg_diff, params: {quality: 50}}}
+      - {name: h264, params: {crf: 28}}
+      - {name: frame_drop, params: {p: 0.2}}
+    attack_strength: 1.0
+
+# ── Validation ──────────────────────────────────────────────────────────────────────────────
+eval:
+  every_steps: 200
+  val_batches: 8                     # 8 × 8 = les 64 clips de validation
+  val_attacks:
+    - {label: h264_crf28, name: h264, params: {crf: 28}}
+    - {label: frame_drop, name: frame_drop, params: {p: 0.2}}
+    - {label: jpeg50, name: framewise, params: {attack: jpeg, params: {quality: 50}}}
+  final_benchmark: {benchmark: video_v1, checkpoints: [last]}
+
+checkpoint:
+  every_steps: 400
+  keep_last: 2
+  keep_best: {"val/bit_acc_mean": max, "val/psnr": max}
+  at_phase_end: true
+
+samples: {every_steps: 400, count: 2}   # clips .mp4 original / tatoué / différence ×10 (+ frame centrale .png)
+resources: {device: auto, precision: auto, compile: false}
+# Pré-entraînement image puis fine-tune vidéo : voir notes.md (init_from).
+init_from: null
+tags: [baseline]

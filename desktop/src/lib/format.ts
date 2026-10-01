@@ -125,10 +125,12 @@ export function formatRelative(value: DateInput, now: number = Date.now()): stri
   const d = toDate(value);
   if (!d) return DASH;
   const diff = (now - d.getTime()) / 1000;
-  const future = diff < 0;
+  // Timestamps just ahead of `now` (clock ticks every 15–60 s, server dates rounded to the
+  // second) are "now", not the future.
+  const future = diff < -90;
   const abs = Math.abs(diff);
   const wrap = (s: string) => (future ? `dans ${s}` : `il y a ${s}`);
-  if (abs < 45) return future ? "dans un instant" : "à l'instant";
+  if (abs < 45 || (!future && diff < 0)) return future ? "dans un instant" : "à l'instant";
   if (abs < 3600) return wrap(`${Math.max(1, Math.round(abs / 60))} min`);
   if (abs < 86400) return wrap(`${Math.round(abs / 3600)} h`);
   const days = Math.round(abs / 86400);

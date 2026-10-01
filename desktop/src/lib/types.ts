@@ -112,12 +112,14 @@ export interface RunSummary {
   cost_eur: number;
   study: string | null;
   trial: number | null;
-  parent: { run_id: string; checkpoint: string; start_phase?: string | number | null } | null;
+  parent: { run_id: string; checkpoint: string; start_phase?: string | number | null; selector?: string | null; resume?: boolean } | null;
   tags: string[];
   progress: Progress | null;
   summary: Record<string, number>;
   params: Record<string, string | number | boolean | null>;
   error: string | null;
+  /** Author (hosted mode, §12.2); null for runs launched outside the app or before users existed. */
+  user?: string | null;
 }
 
 export interface Checkpoint {
@@ -211,6 +213,8 @@ export interface StudySummary {
   best: { trial: number; values: number[]; params: Record<string, unknown>; run_id: string | null }[];
   cost_eur: number;
   budget: { max_trials: number | null; max_hours: number | null; max_eur: number | null; parallel: number };
+  /** Author (hosted mode, §12.2). */
+  user?: string | null;
 }
 
 export interface StudyDetail extends StudySummary {
@@ -218,6 +222,7 @@ export interface StudyDetail extends StudySummary {
   trials: Trial[];
   importances: Record<string, number> | null;
   pareto: number[]; // trial numbers on the front
+  notes: string; // <study>/notes.md
 }
 
 export interface LeaderRow {
@@ -289,11 +294,44 @@ export interface Host {
   gpu?: string | null;
   max_concurrent_jobs: number;
   notes?: string | null;
+  // §12.4 — hosted mode. Optional in TypeScript so the client tolerates a backend that
+  // predates them (the fields are then simply absent).
+  /** Scaleway instance behind this host (power-off / deletion through the API). */
+  scaleway?: ScalewayRef | null;
+  /** Set once the machine has been retired (kept in hosts.yaml for history). */
+  decommissioned_at?: string | null;
+  /** From the cached inventory (`.wmlab/hosts_inventory.json`); null when never checked. */
+  unretrieved_checkpoints?: number | null;
+  unretrieved_bytes?: number | null;
+  inventory_at?: string | null;
+  active_jobs?: number;
+}
+
+export interface ScalewayRef {
+  zone: string;
+  server_id: string;
+}
+
+/** Checkpoint retrieval performed at the end of a train / hpo / eval job (§12.4). */
+export interface JobRetrieval {
+  status: "complete" | "partial" | "failed" | "n/a";
+  checkpoints: number;
+  bytes: number;
+  missing: string[];
+}
+
+/** Outcome of a `retrieve` job (§12.4). */
+export interface RetrieveResult {
+  runs: number;
+  studies: number;
+  checkpoints: number;
+  bytes: number;
+  missing: string[];
 }
 
 export interface Job {
   job_id: string;
-  kind: "train" | "hpo" | "eval" | "setup";
+  kind: "train" | "hpo" | "eval" | "setup" | "retrieve";
   host: string;
   target: string;
   overrides: Record<string, string>;
@@ -308,6 +346,12 @@ export interface Job {
   error: string | null;
   pid: number | null;
   last_sync_at: string | null;
+  // §12 — hosted mode (absent on an older backend).
+  user?: string | null;
+  git_ref?: string | null;
+  git_sha?: string | null;
+  retrieval?: JobRetrieval | null;
+  result?: RetrieveResult | null;
 }
 
 export interface CostItem {
@@ -344,6 +388,16 @@ export interface WorkspaceSettings {
   data_dir: string;
   sync_interval_s: number;
   default_host: string;
+  /** §12.1 (absent on an older backend). */
+  hosted?: HostedSettings;
+}
+
+export interface HostedSettings {
+  enabled: boolean;
+  git_branch: string;
+  auto_pull_s: number;
+  auto_commit: boolean;
+  public_url: string | null;
 }
 
 export interface Overview {
@@ -366,7 +420,7 @@ export type SpecKind = "project" | "experiment" | "hpo" | "benchmark" | "dataset
 export interface Health {
   ok: true;
   version: string;
-  workspace: string;
+  workspace?: string; // only when the request carried a valid token
 }
 
 export interface CreateProjectBody {
@@ -411,9 +465,18 @@ export interface FileContent {
   validation: FileValidation;
 }
 
+/** Git outcome of `PUT /api/files` in hosted mode (§12.3); null outside hosted mode / a git repo. */
+export interface FileGitResult {
+  /** Commit sha (null when nothing was committed). */
+  committed: string | null;
+  pushed: boolean;
+  error: string | null;
+}
+
 export interface SaveFileResult {
   saved: true;
   validation: FileValidation;
+  git?: FileGitResult | null;
 }
 
 export interface ValidateBody {
@@ -489,6 +552,8 @@ export interface InitFrom {
   run: string;
   checkpoint: string;
   start_phase?: string | number | null;
+  /** True: resume at the checkpoint's own step (optimizer + phase restored); incompatible with start_phase. */
+  resume?: boolean;
 }
 
 export interface CreateJobBody {
@@ -502,6 +567,8 @@ export interface CreateJobBody {
   max_hours?: number | null;
   smoke?: boolean;
   init_from?: InitFrom;
+  /** Branch name or sha to run (§12.3); omitted = the server checkout's HEAD. */
+  git_ref?: string;
 }
 
 export interface EstimateBody {
@@ -515,4 +582,103 @@ export interface JobEstimate {
   est_hours: number | null;
   est_eur: number | null;
   basis: string;
+}
+
+// ---------------------------------------------------------------------------
+// §12 — hosted mode (users, git, inventory, Scaleway)
+// ---------------------------------------------------------------------------
+
+export type UserRole = "admin" | "member";
+
+/** `GET /api/me`. */
+export interface Me {
+  name: string;
+  role: UserRole;
+  hosted: boolean;
+  public_url: string | null;
+}
+
+/** `GET /api/users` (admin). */
+export interface UserInfo {
+  name: string;
+  role: UserRole;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+/** `GET /api/git`, `POST /api/git/pull`. */
+export interface GitState {
+  available: boolean;
+  hosted: boolean;
+  branch: string | null;
+  sha: string | null;
+  short_sha: string | null;
+  dirty: boolean;
+  remote: string | null;
+  ahead: number | null;
+  behind: number | null;
+  last_pull_at: string | null;
+  last_pull_error: string | null;
+}
+
+export interface HostInventoryRun {
+  run_id: string;
+  project: string | null;
+  status: string | null;
+  checkpoints_total: number;
+  checkpoints_local: number;
+  bytes_remote: number;
+  bytes_missing: number;
+  indexed: boolean;
+}
+
+export interface HostInventoryStudy {
+  study_id: string;
+  trials: number;
+  synced: boolean;
+}
+
+/** `GET /api/hosts/{name}/inventory`. */
+export interface HostInventory {
+  host: string;
+  reachable: boolean;
+  error: string | null;
+  checked_at: string;
+  active_jobs: number;
+  remote_data_dir: string | null;
+  runs: HostInventoryRun[];
+  studies: HostInventoryStudy[];
+  unretrieved_checkpoints: number;
+  unretrieved_bytes: number;
+  unindexed_runs: number;
+}
+
+/** `GET /api/hosts/{name}/instance`. */
+export interface HostInstance {
+  configured: boolean;
+  state: string | null;
+  commercial_type: string | null;
+  zone: string | null;
+  error: string | null;
+}
+
+export interface DecommissionBody {
+  confirm: true;
+  delete_instance?: boolean;
+  /** Admin only: retire an unreachable host anyway (journalised). */
+  force?: boolean;
+}
+
+/** `POST /api/hosts/{name}/decommission`. */
+export interface DecommissionResult {
+  ok: boolean;
+  deleted_instance: boolean;
+  instance_state: string | null;
+  message: string;
+}
+
+/** `POST /api/hosts/{name}/poweroff`. */
+export interface PoweroffResult {
+  ok: boolean;
+  instance_state: string | null;
 }

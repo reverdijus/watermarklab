@@ -15,6 +15,14 @@ interface WmlabBridge {
   apiBase: string;
   token: string;
   platform: string;
+  /** "local": backend started by the app; "remote": server chosen through the "Serveur" menu (§12.6). */
+  mode: "local" | "remote";
+  /** Opens the main-process dialog "Se connecter à un serveur distant…". */
+  openConnectDialog: () => void;
+  /** Switches back to the local backend (menu "Serveur → Utiliser le backend local"). */
+  useLocalBackend: () => void;
+  /** Remote mode: forgets the stored token, then opens the connection dialog. */
+  disconnect: () => void;
 }
 
 interface Window {

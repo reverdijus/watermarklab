@@ -1,0 +1,142 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « baseline » — projet image-hidden (image, 48 bits)
+# Format : ARCHITECTURE.md §5.3 · exemple de RÉFÉRENCE : copiez-le pour créer vos variantes
+#   wmlab new experiment image-hidden ma_variante --from baseline
+#
+# Vérifier   : .venv/bin/python -m wmlab.cli validate projects/image-hidden/experiments/baseline.yaml
+# Essai éclair (≈ 1 min, données remplacées par du synthétique, ≤ 6 steps par phase) :
+#              .venv/bin/python -m wmlab.cli train projects/image-hidden/experiments/baseline.yaml --smoke
+# Lancer     : depuis l'app (bouton « Nouveau lancement »), ou
+#              .venv/bin/python -m wmlab.cli train projects/image-hidden/experiments/baseline.yaml
+#
+# Tailles choisies pour tourner en quelques minutes sur le Mac (MPS) : images 64 px,
+# 1 500 steps au total, batch 16. Pour un vrai entraînement sur GPU : données réelles (@coco2017),
+# 128–256 px, ×10 à ×50 steps, batch 32–64 (voir notes.md).
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: baseline                       # = nom du fichier (sans .yaml)
+description: "HiDDeN + curriculum 3 phases (warmup sans attaque → rampe d'attaques → affinage qualité)"
+hypothesis: >-
+  Un warmup sans attaque (poids image faible) évite le blocage du décodeur à 50 % (bit_acc
+  > 0,9 en fin de warmup) ; la rampe conjointe attaques + poids image puis l'affinage à poids
+  fort remontent le PSNR au-dessus de 34 dB en gardant val/bit_acc_mean ≥ 0,7 — en 1 500 steps
+  sur données synthétiques (repère mesuré sur Mac M4 : ~34 dB, 0,71, ~3 min).
+seed: 0                              # graine globale (messages, tirage des attaques, init des poids)
+
+# ── Architecture ─────────────────────────────────────────────────────────────────────────────
+# name = composant du registre MODELS (liste : wmlab registry --kind model).
+# params = hyperparamètres de l'architecture. Ne JAMAIS y mettre nbits : il vient de
+# project.yaml (message_bits: 48).
+model:
+  name: hidden
+  params:
+    channels: 64                     # largeur des convolutions
+    enc_blocks: 4                    # blocs de l'encodeur (image + message → image tatouée)
+    dec_blocks: 7                    # blocs du décodeur (image attaquée → 48 logits)
+    strength: 1.0                    # amplitude du résidu : ↑ robustesse, ↓ PSNR
+
+# ── Données ─────────────────────────────────────────────────────────────────────────────────
+# Chaque split = un dataset du registre DATASETS + ses params + une liste de prétraitements.
+# Par défaut : données synthétiques déterministes (formes, dégradés, textures) → aucun
+# téléchargement nécessaire. Seeds différentes entre train et val ⇒ contenus disjoints.
+data:
+  train:
+    dataset: synthetic
+    params: {modality: image, size: 64, num_items: 2048, seed: 0}
+    preprocess:
+      - {name: hflip, params: {p: 0.5}}    # augmentation : miroir horizontal aléatoire
+    limit: null                            # nombre max d'items (null = tout le dataset)
+    # ── Passer aux vraies images (COCO 2017) : remplacer dataset/params/preprocess par
+    # dataset: image_folder
+    # params: {root: "@coco2017"}          # « @nom » = datasets/coco2017.yaml, chemin selon l'hôte
+    # preprocess:
+    #   - {name: random_resized_crop, params: {size: 64, scale: [0.5, 1.0]}}
+    #   - {name: hflip, params: {p: 0.5}}
+  val:
+    dataset: synthetic
+    params: {modality: image, size: 64, num_items: 128, seed: 1}
+    preprocess: []                         # validation : jamais d'aléa dans les prétraitements
+    # Réel : {dataset: image_folder, params: {root: "@div2k_valid"},
+    #         preprocess: [{name: center_crop, params: {size: 64}}]}
+  batch_size: 16
+  num_workers: 2                     # processus de chargement (0 = dans le process principal)
+
+# ── Optimiseur ──────────────────────────────────────────────────────────────────────────────
+# lr = LR de base ; chaque phase lui applique un facteur (lr.schedule ci-dessous).
+optimizer: {name: adamw, lr: 1.0e-3, weight_decay: 1.0e-4, betas: [0.9, 0.999], grad_clip: 1.0}
+
+# ── Pertes ──────────────────────────────────────────────────────────────────────────────────
+# Termes nommés librement (msg, img…) : les phases modulent leur poids via loss_weights
+# (qui remplacent alors `weight`).
+# Échelle : la MSE sur des images dans [0, 1] est minuscule (38 dB de PSNR ⇔ MSE 1,6e-4) alors
+# que la BCE du message vaut 0,05–0,7 : il faut des poids image de l'ordre de 100 pour qu'elle
+# pèse. Poids faible ⇒ décodage parfait mais PSNR ~13 dB ; poids trop fort ⇒ PSNR > 40 dB mais
+# décodage fragile. C'est LE compromis à régler (hpo/lr_weights.yaml, hpo/pareto.yaml).
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}  # décodage du message (BCE sur les logits)
+    img: {name: mse, weight: 100.0}        # imperceptibilité (MSE original ↔ tatoué)
+
+# ── Curriculum ──────────────────────────────────────────────────────────────────────────────
+# Les phases s'enchaînent (steps cumulés = 1 500). Pour chaque phase : planning de LR, poids
+# des pertes (nombre, {ramp: [a, b]} ou {piecewise: [[frac, v], …]} sur la durée de la phase),
+# attaques tirées à chaque step avec une probabilité ∝ p, et force d'attaque.
+# Force effective par batch : U(0, attack_strength) (random_strength: true, défaut).
+phases:
+  # 1) Apprendre à décoder, sans attaque et avec peu de contrainte d'imperceptibilité :
+  #    évite que le décodeur reste bloqué à 50 % de bits justes.
+  - name: warmup_decode
+    steps: 300
+    lr: {schedule: linear_warmup, warmup_steps: 100}   # LR monte de 0 à lr en 100 steps
+    loss_weights: {img: 0.1}                           # quasi libre : le résidu peut être fort
+    attacks: []                                        # liste vide ⇒ identité
+
+  # 2) Robustesse : attaques différentiables de plus en plus fortes, contrainte image croissante.
+  - name: robustness_ramp
+    steps: 900
+    lr: {schedule: constant}
+    loss_weights:
+      img: {ramp: [0.1, 100.0]}                        # 0,1 → 100 sur la durée de la phase
+    attacks:
+      - {name: identity, p: 0.5}                       # garder des exemples propres
+      - {name: jpeg_diff, params: {quality: 50}}       # JPEG différentiable (approximation DCT)
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+      - {name: gaussian_noise, params: {std: 0.06}}
+    attack_strength: {ramp: [0.0, 1.0]}                # la sévérité monte de 0 à 1
+
+  # 3) Affinage de l'imperceptibilité à robustesse fixée, avec le VRAI JPEG (non différentiable :
+  #    le trainer applique automatiquement un straight-through estimator).
+  - name: finetune_imperceptibility
+    steps: 300
+    lr: {schedule: cosine, min_factor: 0.01}           # décroissance cosinus jusqu'à 1 % du LR
+    loss_weights: {img: 300.0}                         # la qualité d'abord
+    attacks:
+      - {name: jpeg, params: {quality: 50}}
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+    attack_strength: 1.0
+
+# ── Validation ──────────────────────────────────────────────────────────────────────────────
+# Toutes les every_steps (et en fin de phase) : val/psnr, val/ssim, val/bit_acc (sans attaque),
+# val/bit_acc/<label> par attaque, val/bit_acc_mean = moyenne sur val_attacks.
+eval:
+  every_steps: 250
+  val_batches: 8                     # 8 × 16 = les 128 images de validation
+  val_attacks:
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+    - {label: crop50, name: crop, params: {area: 0.5}}
+  # Benchmark figé exécuté à la fin sur les checkpoints listés (ou null pour ne rien lancer).
+  final_benchmark: {benchmark: image_v1, checkpoints: [last]}
+
+# ── Checkpoints ─────────────────────────────────────────────────────────────────────────────
+checkpoint:
+  every_steps: 500
+  keep_last: 2                       # derniers checkpoints périodiques conservés
+  keep_best: {"val/bit_acc_mean": max, "val/psnr": max}   # sélecteurs « best:val/… »
+  at_phase_end: true                 # « phase_end:<phase> » : points de branchement (init_from)
+
+samples: {every_steps: 500, count: 4}   # images originale / tatouée / différence ×10 visibles dans l'app
+resources: {device: auto, precision: auto, compile: false}   # auto : cuda > mps > cpu
+init_from: null                      # branchement depuis un autre run : voir wsd_branch.yaml
+tags: [baseline]

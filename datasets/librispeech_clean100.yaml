@@ -1,0 +1,14 @@
+# Catalogue de datasets — format : ARCHITECTURE.md §5.6
+# Référence dans une spec : {dataset: audio_folder, params: {root: "@librispeech_clean100"}}
+name: librispeech_clean100
+modality: audio
+description: >-
+  LibriSpeech train-clean-100 : 100 h de parole anglaise lue (livres audio LibriVox),
+  FLAC 16 kHz mono. Parole « propre » pour l'entraînement audio (AudioSeal-like).
+  Téléchargement : https://www.openslr.org/resources/12/train-clean-100.tar.gz (~6,3 Go).
+source: "https://www.openslr.org/12"
+license: "CC BY 4.0"
+paths:
+  default: "~/datasets/librispeech/LibriSpeech/train-clean-100"
+  # Exemple d'hôte Scaleway :
+  # scw-l40s: "/root/datasets/librispeech/LibriSpeech/train-clean-100"

@@ -44,11 +44,26 @@ export const JOB_KIND_LABELS: Record<Job["kind"], string> = {
   hpo: "Étude HPO",
   eval: "Évaluation",
   setup: "Préparation machine",
+  retrieve: "Rapatriement des checkpoints",
 };
 
 /** A run, study or job that may still change (drives polling). */
 export function isActiveStatus(status: string | null | undefined): boolean {
   return status === "running" || status === "queued" || status === "launching";
+}
+
+/**
+ * HPO trial stopped early by the study's pruner. The trainer records it as
+ * `status = "killed"`, `error = "pruned"` (wmlab.train.trainer): this is the normal
+ * behaviour of a study, not a failure, and the UI labels it "Élagué".
+ */
+export function isPrunedTrial(run: Pick<RunSummary, "trial" | "status" | "error">): boolean {
+  return run.trial != null && run.status === "killed" && run.error === "pruned";
+}
+
+/** Status label of a run, "Élagué" for a pruned HPO trial. */
+export function runStatusLabel(run: Pick<RunSummary, "trial" | "status" | "error">): string {
+  return isPrunedTrial(run) ? "Élagué" : STATUS_LABELS[run.status];
 }
 
 /** Progress in [0, 1] (null when unknown). */

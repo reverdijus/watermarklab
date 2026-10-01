@@ -330,6 +330,16 @@ class StudyReader:
     def logs(self, tail: int = 500) -> list[str]:
         return tail_lines(self.dir / "stdout.log", tail)
 
+    def notes(self) -> str:
+        """``notes.md`` of the study (conclusions), empty if absent."""
+        try:
+            return (self.dir / "notes.md").read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def set_notes(self, text: str) -> None:
+        atomic_write_text(self.dir / "notes.md", text)
+
     def spec_yaml(self) -> str:
         try:
             return (self.dir / "spec.yaml").read_text(encoding="utf-8")

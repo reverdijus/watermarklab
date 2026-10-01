@@ -1,0 +1,25 @@
+# Projet « Image — baselines pré-entraînées » — format : ARCHITECTURE.md §5.2
+#
+# Modèles de l'état de l'art évalués avec leurs POIDS OFFICIELS (wmlab weights list), pour
+# situer nos architectures sur les mêmes benchmarks. Chaque expérience d'évaluation a
+# « phases: [] » : le modèle n'est pas entraîné, le run contient une validation, des
+# échantillons et le benchmark final (checkpoint de référence, sans copie des poids).
+name: image-baselines                # = nom du dossier projects/image-baselines
+title: "Image — baselines pré-entraînées"
+modality: image
+description: >-
+  Video Seal, Pixel Seal, Watermark Anything, TrustMark, InvisMark et SSL watermarking avec
+  leurs poids officiels, comparés à charge utile égale ; Pixel Seal y est aussi ré-entraîné
+  (fine-tuning depuis ses poids officiels).
+# 32 bits = capacité de Watermark Anything, la plus petite des six : tous les modèles portent
+# les mêmes 32 bits utiles (les modèles plus capacitaires complètent leur message avec un
+# bourrage fixe, ignoré au décodage). Pour comparer à capacité native (94 / 100 / 256 bits),
+# créer un autre projet avec un autre message_bits : les modèles s'adaptent seuls.
+message_bits: 32
+default_benchmark: image_v1
+
+objectives:
+  quality:    {metric: psnr, direction: maximize, label: "PSNR (dB)", constraint: ">= 38"}
+  robustness: {metric: bit_acc_mean, direction: maximize, label: "Bit acc. moyenne"}
+
+tags: [image, baselines, pretrained]

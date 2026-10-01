@@ -1,0 +1,16 @@
+# Catalogue de datasets — format : ARCHITECTURE.md §5.6
+# Référence dans une spec : {dataset: audio_folder, params: {root: "@fma_small"}}
+name: fma_small
+modality: audio
+description: >-
+  Free Music Archive « small » : 8 000 extraits musicaux de 30 s (MP3), 8 genres équilibrés,
+  ~7,2 Gio. Musique pour tester la généralisation au-delà de la parole.
+  Téléchargement : https://os.unil.cloud.switch.ch/fma/fma_small.zip
+source: "https://github.com/mdeff/fma"
+license: >-
+  Audio : licence choisie par chaque artiste (Creative Commons variées, à vérifier par
+  piste avant tout usage commercial) ; métadonnées : CC BY 4.0 ; code : MIT.
+paths:
+  default: "~/datasets/fma/fma_small"
+  # Exemple d'hôte Scaleway :
+  # scw-l40s: "/root/datasets/fma/fma_small"

@@ -20,8 +20,9 @@
   --danger: #b3413a;
   --info: #44689e;
 
-  /* Derived tokens */
-  --faint: #9a978d;
+  /* Derived tokens. --faint is the lightest text still readable as small (≤ 12 px) text:
+     ≥ 4.5:1 on --bg and --surface (WCAG AA), in both modes. */
+  --faint: #75726a;
   --border-strong: #d6d2c4;
   --hover: rgba(31, 30, 29, 0.045);
   --active: rgba(31, 30, 29, 0.075);
@@ -57,7 +58,7 @@
     --warning: #e0a94a;
     --danger: #e27d74;
     --info: #86a8da;
-    --faint: #7c7a72;
+    --faint: #9e9c93;
     --border-strong: #55534e;
     --hover: rgba(245, 244, 238, 0.05);
     --active: rgba(245, 244, 238, 0.09);
@@ -91,7 +92,7 @@
   --warning: #e0a94a;
   --danger: #e27d74;
   --info: #86a8da;
-  --faint: #7c7a72;
+  --faint: #9e9c93;
   --border-strong: #55534e;
   --hover: rgba(245, 244, 238, 0.05);
   --active: rgba(245, 244, 238, 0.09);

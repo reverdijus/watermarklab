@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Plan HPO « lr » — projet audio-seal-lite · format : ARCHITECTURE.md §5.4
+#
+# Mono-objectif : robustesse (val/bit_acc_mean) sous contrainte de qualité (val/snr).
+# Hyperparamètre scientifique = LR ; hyperparamètres de nuisance co-optimisés = poids spectral
+# final et force du résidu (sans eux, comparer des LR serait biaisé).
+# Essai éclair : .venv/bin/python -m wmlab.cli hpo projects/audio-seal-lite/hpo/lr.yaml --smoke
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: lr
+experiment: baseline
+description: "LR de base (+ poids spectral de l'affinage et force du résidu en nuisance)"
+hypothesis: >-
+  Le LR optimal d'audio_conv est plus bas que 1e-3 (signaux longs, gradients bruités) ;
+  un LR bien réglé doit gagner plusieurs points de bit_acc_mean à SNR égal.
+
+sampler: {name: tpe, params: {n_startup_trials: 6}}
+# Pruner median plutôt qu'ASHA : avec des essais de 600 steps (300 + 225 + 75), ASHA
+# (min_resource 300, ×3) n'aurait qu'un palier de décision, au step 300 = fin du warmup, où
+# phases.2.loss_weights.spec n'a encore aucun effet. Median compare chaque validation à
+# partir de n_warmup_steps (ici 400 et 500 : rampe puis affinage ; 600 = validation finale,
+# jamais élaguée) à la médiane des essais précédents au même step.
+pruner: {name: median, params: {n_startup_trials: 4, n_warmup_steps: 350}}
+
+objectives:
+  - {metric: val/bit_acc_mean, direction: maximize}
+constraints:
+  - {metric: val/snr, op: ">=", value: 20}        # projet : 25 dB ; marge pour la basse fidélité
+
+space:
+  optimizer.lr: {type: float, low: 1.0e-4, high: 3.0e-3, log: true}
+  phases.2.loss_weights.spec: {type: float, low: 0.5, high: 5.0, log: true}   # affinage : poids STFT
+  model.params.strength: {type: float, low: 0.5, high: 2.0, log: true}
+
+fidelity:
+  steps_scale: 0.25                  # réduit steps ET warmup_steps des phases (overrides ci-dessous après)
+  overrides:
+    phases.0.steps: 300              # warmup de décodage complet : un warmup trop court bloque
+    phases.0.lr.warmup_steps: 100    # le décodeur à 0,5 et l'étude ne mesure plus rien
+    eval.every_steps: 100            # validations 100…600 ; le pruner décide à 400 et 500
+    eval.final_benchmark: null
+
+budget: {max_trials: 16, max_hours: 2, max_eur: 10, parallel: 1}
+objective_agg: last

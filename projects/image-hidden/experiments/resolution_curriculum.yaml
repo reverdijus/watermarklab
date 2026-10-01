@@ -1,0 +1,111 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « resolution_curriculum » — projet image-hidden (image, 48 bits)
+# Format : ARCHITECTURE.md §5.3
+#
+# Idée : apprendre l'essentiel à basse résolution (64 px : 4× moins de pixels ⇒ steps bien
+# moins chers), puis finir à la résolution cible (128 px). Même principe que le « progressive
+# resizing » : le gros du coût GPU est payé sur de petites images.
+#
+# Mécanisme : une phase peut surcharger ses données avec `data: {train: …}` ; le trainer
+# reconstruit alors le DataLoader au début de la phase. `batch_size` peut aussi changer par
+# phase (à 128 px, 4× plus de mémoire par image ⇒ batch divisé par 2 ici).
+# Prérequis : une architecture qui accepte plusieurs résolutions (c'est le cas de `hidden` :
+# convolutions + pooling global dans le décodeur ; vérifier pour vos propres modèles).
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/image-hidden/experiments/resolution_curriculum.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/image-hidden/experiments/resolution_curriculum.yaml --smoke
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: resolution_curriculum
+description: "Curriculum de résolution : 64 px (warmup + rampe d'attaques) puis 128 px (affinage)"
+hypothesis: >-
+  Entraîner d'abord à 64 px puis finir à 128 px atteint la même robustesse (val/bit_acc_mean,
+  mesurée à 128 px) que la baseline pour un coût GPU nettement inférieur à un entraînement
+  entièrement à 128 px.
+seed: 0
+
+model:
+  name: hidden
+  params: {channels: 64, enc_blocks: 4, dec_blocks: 7, strength: 1.0}
+
+# Données « par défaut » = celles des phases qui ne surchargent pas `data` (ici : 64 px).
+data:
+  train:
+    dataset: synthetic
+    params: {modality: image, size: 64, num_items: 2048, seed: 0}
+    preprocess: [{name: hflip, params: {p: 0.5}}]
+    # Réel : dataset: image_folder ; params: {root: "@coco2017"} ;
+    #        preprocess: [{name: random_resized_crop, params: {size: 64}}, {name: hflip}]
+  val:
+    # La validation se fait à la résolution CIBLE (128 px) pendant tout le run : on mesure
+    # directement ce qui nous intéresse, y compris pendant les phases à 64 px.
+    dataset: synthetic
+    params: {modality: image, size: 128, num_items: 128, seed: 1}
+    preprocess: []
+  batch_size: 16
+  num_workers: 2
+
+optimizer: {name: adamw, lr: 1.0e-3, weight_decay: 1.0e-4, betas: [0.9, 0.999], grad_clip: 1.0}
+
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}
+    img: {name: mse, weight: 100.0}        # échelle : voir baseline.yaml
+
+phases:
+  # 64 px — décodage sans attaque.
+  - name: warmup_decode_64
+    steps: 250
+    lr: {schedule: linear_warmup, warmup_steps: 100}
+    loss_weights: {img: 0.1}
+    attacks: []
+
+  # 64 px — rampe d'attaques (la phase la plus longue, donc la moins chère possible).
+  - name: robustness_64
+    steps: 750
+    lr: {schedule: constant}
+    loss_weights: {img: {ramp: [0.1, 100.0]}}
+    attacks:
+      - {name: identity, p: 0.5}
+      - {name: jpeg_diff, params: {quality: 50}}
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+    attack_strength: {ramp: [0.0, 1.0]}
+
+  # 128 px — changement de résolution : nouvelles données + batch plus petit.
+  - name: finetune_128
+    steps: 500
+    lr: {schedule: cosine, warmup_steps: 50, min_factor: 0.01}   # court re-warmup après le changement
+    loss_weights: {img: 300.0}
+    attacks:
+      - {name: jpeg, params: {quality: 50}}                     # vrai JPEG (STE automatique)
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+    attack_strength: 1.0
+    batch_size: 8
+    data:
+      train:
+        dataset: synthetic
+        params: {modality: image, size: 128, num_items: 2048, seed: 0}
+        preprocess: [{name: hflip, params: {p: 0.5}}]
+        # Réel : {dataset: image_folder, params: {root: "@coco2017"},
+        #         preprocess: [{name: random_resized_crop, params: {size: 128}}, {name: hflip}]}
+
+eval:
+  every_steps: 250
+  val_batches: 8
+  val_attacks:
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+    - {label: crop50, name: crop, params: {area: 0.5}}
+  final_benchmark: {benchmark: image_v1, checkpoints: [last]}   # image_v1 est en 128 px
+
+checkpoint:
+  every_steps: 500
+  keep_last: 2
+  keep_best: {"val/bit_acc_mean": max, "val/psnr": max}
+  at_phase_end: true                 # « phase_end:robustness_64 » = point de reprise à 64 px
+
+samples: {every_steps: 500, count: 4}
+resources: {device: auto, precision: auto, compile: false}
+init_from: null
+tags: [curriculum, resolution]

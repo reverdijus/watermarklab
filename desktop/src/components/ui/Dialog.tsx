@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useRef, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { IconButton } from "./Button";
@@ -8,6 +8,10 @@ import { IconButton } from "./Button";
 const overlayStack: number[] = [];
 let overlaySeq = 0;
 
+const FOCUSABLE =
+  "a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
+
+/** Keyboard handling shared by Dialog and Drawer: Escape closes, Tab stays inside the panel. */
 function useOverlay(open: boolean, onClose: () => void, panelRef: RefObject<HTMLElement | null>) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -27,9 +31,32 @@ function useOverlay(open: boolean, onClose: () => void, panelRef: RefObject<HTML
       }
     });
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && overlayStack[overlayStack.length - 1] === id) {
+      if (overlayStack[overlayStack.length - 1] !== id) return;
+      if (e.key === "Escape") {
         e.stopPropagation();
         onCloseRef.current();
+        return;
+      }
+      // Simple focus trap: Tab / Shift+Tab cycle inside the top-most overlay.
+      if (e.key === "Tab") {
+        const panel = panelRef.current;
+        if (!panel) return;
+        const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null || el === panel);
+        if (!focusable.length) {
+          e.preventDefault();
+          panel.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const current = document.activeElement as HTMLElement | null;
+        if (e.shiftKey && (current === first || !panel.contains(current))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (current === last || !panel.contains(current))) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -79,6 +106,8 @@ export function Dialog({
   bodyClassName,
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
   useOverlay(open, onClose, panelRef);
   if (!open) return null;
   return createPortal(
@@ -92,6 +121,8 @@ export function Dialog({
         ref={panelRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={title ? titleId : undefined}
+        aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
         className={clsx(
           "no-drag relative flex w-full animate-pop-in flex-col rounded-2xl border border-border bg-surface shadow-lg outline-none",
@@ -103,8 +134,16 @@ export function Dialog({
         {(title || description) && (
           <div className="flex items-start justify-between gap-4 px-6 pb-2 pt-5">
             <div className="min-w-0">
-              {title && <h2 className="font-serif text-[20px] leading-tight text-fg">{title}</h2>}
-              {description && <p className="mt-1 text-[13.5px] text-muted">{description}</p>}
+              {title && (
+                <h2 id={titleId} className="font-serif text-[20px] leading-tight text-fg">
+                  {title}
+                </h2>
+              )}
+              {description && (
+                <p id={descriptionId} className="mt-1 text-[13.5px] text-muted">
+                  {description}
+                </p>
+              )}
             </div>
             <IconButton icon={X} label="Fermer" size="sm" onClick={onClose} tooltip={false} className="-mr-2 -mt-1" />
           </div>
@@ -137,6 +176,8 @@ export interface DrawerProps {
 /** Right side panel. */
 export function Drawer({ open, onClose, title, description, children, footer, width = 480, className }: DrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
   useOverlay(open, onClose, panelRef);
   if (!open) return null;
   return createPortal(
@@ -146,6 +187,8 @@ export function Drawer({ open, onClose, title, description, children, footer, wi
         ref={panelRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={title ? titleId : undefined}
+        aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
         style={{ width: `min(${width}px, 92vw)` }}
         className={clsx(
@@ -155,8 +198,16 @@ export function Drawer({ open, onClose, title, description, children, footer, wi
       >
         <div className="flex items-start justify-between gap-4 border-b border-border px-5 pb-3.5 pt-4">
           <div className="min-w-0">
-            {title && <h2 className="font-serif text-[19px] leading-tight text-fg">{title}</h2>}
-            {description && <p className="mt-1 text-[13px] text-muted">{description}</p>}
+            {title && (
+              <h2 id={titleId} className="font-serif text-[19px] leading-tight text-fg">
+                {title}
+              </h2>
+            )}
+            {description && (
+              <p id={descriptionId} className="mt-1 text-[13px] text-muted">
+                {description}
+              </p>
+            )}
           </div>
           <IconButton icon={X} label="Fermer" size="sm" onClick={onClose} tooltip={false} className="-mr-1.5" />
         </div>

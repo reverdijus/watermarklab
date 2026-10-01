@@ -11,7 +11,7 @@ export interface TooltipProps {
   /** Delay before showing (ms). */
   delay?: number;
   className?: string;
-  /** Extra classes on the inline wrapper. */
+  /** Classes of the wrapper (replaces the default "inline-flex"). */
   wrapperClassName?: string;
   disabled?: boolean;
 }
@@ -61,7 +61,7 @@ export function Tooltip({ content, children, side = "top", delay = 300, classNam
   return (
     <span
       ref={anchorRef}
-      className={clsx("inline-flex", wrapperClassName)}
+      className={wrapperClassName ?? "inline-flex"}
       onMouseEnter={show}
       onMouseLeave={hide}
       onFocus={show}

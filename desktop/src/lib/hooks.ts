@@ -1,13 +1,30 @@
 /** Generic React hooks (debounce, hotkeys, persisted state, ticking clock). */
 import { useCallback, useEffect, useRef, useState } from "react";
 
-/** Value that only updates after `delay` ms without change. */
+/** Structural identity of a value (objects compared by content, not by reference). */
+function stableKey(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Value that only updates after `delay` ms without change. Objects are compared
+ * structurally, so callers may pass a literal recreated on every render without
+ * restarting the timer (and without re-render loops).
+ */
 export function useDebouncedValue<T>(value: T, delay = 400): T {
   const [debounced, setDebounced] = useState(value);
+  const latest = useRef(value);
+  latest.current = value;
+  const key = stableKey(value);
   useEffect(() => {
-    const id = window.setTimeout(() => setDebounced(value), delay);
+    const id = window.setTimeout(() => setDebounced(() => latest.current), delay);
     return () => window.clearTimeout(id);
-  }, [value, delay]);
+  }, [key, delay]);
   return debounced;
 }
 

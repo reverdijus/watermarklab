@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# GABARIT d'expérience Watermark Lab (ARCHITECTURE.md §5.3) — version image.
+# À copier dans projects/<projet>/experiments/<nom>.yaml (ou partir de la baseline du projet :
+#   .venv/bin/python -m wmlab.cli new experiment <projet> <nom> --from baseline).
+# Remplacer chaque « TODO ». Champs inconnus interdits. Référence complète des champs :
+# references/spec-reference.md. Audio / vidéo : voir projects/audio-seal-lite et
+# projects/video-framewise.
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/<projet>/experiments/<nom>.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/<projet>/experiments/<nom>.yaml --smoke
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: my_experiment                  # TODO = nom du fichier sans .yaml
+description: "TODO : ce qui change par rapport à la référence (une variable à la fois)"
+hypothesis: "TODO : résultat attendu, chiffré (ex. +3 pts de bit_acc_mean à PSNR égal), et pourquoi"
+seed: 0
+
+model:
+  name: hidden                       # TODO : composant du registre (wmlab registry --kind model)
+  params: {channels: 64}             # jamais nbits (vient de project.yaml: message_bits)
+
+data:
+  train:
+    dataset: synthetic               # réel : image_folder + params: {root: "@<dataset du catalogue>"}
+    params: {modality: image, size: 64, num_items: 2048, seed: 0}
+    preprocess: [{name: hflip, params: {p: 0.5}}]
+    limit: null
+  val:
+    dataset: synthetic
+    params: {modality: image, size: 64, num_items: 128, seed: 1}   # seed ≠ train
+    preprocess: []                   # pas d'aléa en validation
+  batch_size: 16
+  num_workers: 2
+
+optimizer: {name: adamw, lr: 1.0e-3, weight_decay: 1.0e-4, betas: [0.9, 0.999], grad_clip: 1.0}
+
+loss:
+  terms:                             # noms de termes libres, réutilisés dans phases[].loss_weights
+    msg: {name: message_bce, weight: 1.0}
+    img: {name: mse, weight: 100.0}  # MSE sur [0,1] minuscule : poids ~100 (voir la baseline image-hidden)
+
+phases:
+  - name: warmup_decode              # décoder d'abord, sans attaque
+    steps: 300
+    lr: {schedule: linear_warmup, warmup_steps: 100}
+    loss_weights: {img: 0.1}
+    attacks: []
+  - name: robustness_ramp            # attaques de plus en plus fortes
+    steps: 900
+    lr: {schedule: constant}
+    loss_weights: {img: {ramp: [0.1, 100.0]}}
+    attacks:
+      - {name: identity, p: 0.5}
+      - {name: jpeg_diff, params: {quality: 50}}
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+    attack_strength: {ramp: [0.0, 1.0]}
+  - name: finetune_imperceptibility  # qualité ↑ à robustesse fixée, attaques réelles
+    steps: 300
+    lr: {schedule: cosine, min_factor: 0.01}
+    loss_weights: {img: 300.0}
+    attacks: [{name: jpeg, params: {quality: 50}}, {name: gaussian_blur, params: {sigma: 2.0}}]
+    attack_strength: 1.0
+
+eval:
+  every_steps: 250
+  val_batches: 8
+  val_attacks:                       # définit val/bit_acc_mean
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+  final_benchmark: {benchmark: image_v1, checkpoints: [last]}   # ou null
+
+checkpoint:
+  every_steps: 500
+  keep_last: 2
+  keep_best: {"val/bit_acc_mean": max, "val/psnr": max}
+  at_phase_end: true
+
+samples: {every_steps: 500, count: 4}
+resources: {device: auto, precision: auto, compile: false}
+init_from: null                      # ou {run: <run_id>, checkpoint: "phase_end:<phase>", start_phase: <phase>, load_optimizer: false}
+tags: []

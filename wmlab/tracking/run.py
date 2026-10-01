@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import io
 import os
+import re
 import signal
 import sys
 import threading
@@ -26,6 +27,7 @@ from wmlab.tracking.checkpoints import (
 )
 from wmlab.tracking.env import capture_env as _capture_env
 from wmlab.tracking.io import (
+    append_jsonl,
     atomic_write_json,
     atomic_write_text,
     json_line,
@@ -38,8 +40,19 @@ from wmlab.tracking.samples import safe_name, write_sample
 from wmlab.tracking.system import SystemSampler
 
 FORMAT_VERSION = 1
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 FINAL_STATUSES = ("completed", "failed", "killed")
 MAX_ERROR_CHARS = 20000
+
+
+def _process_start(pid: int) -> float | None:
+    """Creation time of ``pid`` (epoch), used as a guard against pid reuse; None without psutil."""
+    try:
+        import psutil
+
+        return round(float(psutil.Process(pid).create_time()), 3)
+    except Exception:
+        return None
 
 
 class RunTerminated(KeyboardInterrupt):
@@ -86,6 +99,14 @@ class _Tee(io.TextIOBase):
         return getattr(self._original, "encoding", "utf-8")
 
 
+def launch_user(launch_info: dict[str, Any] | None) -> str | None:
+    """``user`` of a launch file written by the app (§12.2), ``None`` outside the app."""
+    if not isinstance(launch_info, dict):
+        return None
+    user = launch_info.get("user")
+    return str(user) if isinstance(user, str) and user.strip() else None
+
+
 def default_notes(spec: dict[str, Any], run_id: str) -> str:
     """Pre-filled ``notes.md`` (title, description, hypothesis, observations, conclusion)."""
     name = spec.get("name") or run_id
@@ -97,6 +118,36 @@ def default_notes(spec: dict[str, Any], run_id: str) -> str:
     lines += ["## Hypothèse", "", hypothesis or "_(à compléter)_", "",
               "## Observations", "", "", "## Conclusion", "", ""]
     return "\n".join(lines)
+
+
+def write_eval_file(run_dir: Path, result: dict[str, Any]) -> Path:
+    """Write an EvalResult to ``<run>/eval/<checkpoint>__<benchmark>.json`` (atomic)."""
+    result = dict(result)
+    result.setdefault("run_id", Path(run_dir).name)
+    result.setdefault("created_at", utc_iso())
+    checkpoint = safe_name(result.get("checkpoint", "unknown"))
+    benchmark = safe_name(result.get("benchmark", "unknown"))
+    suffix = "__smoke" if result.get("smoke") else ""  # never overwrite a full evaluation
+    path = Path(run_dir) / "eval" / f"{checkpoint}__{benchmark}{suffix}.json"
+    atomic_write_json(path, result)
+    return path
+
+
+def append_event(folder: Path, type: str, **data: Any) -> None:
+    """Append an event to ``<folder>/events.jsonl`` of an existing run or study folder."""
+    append_jsonl(Path(folder) / "events.jsonl", {"t": time.time(), "type": type, **data})
+
+
+def log_eval_to(run_dir: Path, result: dict[str, Any]) -> Path:
+    """Record an EvalResult in an existing run folder (file + ``eval`` event).
+
+    For processes that evaluate a finished run without owning it (``wmlab eval``).
+    """
+    path = write_eval_file(run_dir, result)
+    append_event(run_dir, "eval", checkpoint=result.get("checkpoint"),
+                 benchmark=result.get("benchmark"), summary=result.get("summary") or {},
+                 path=path.relative_to(run_dir).as_posix())
+    return path
 
 
 class Run:
@@ -141,6 +192,9 @@ class Run:
 
         base = Path(runs_dir) if runs_dir is not None else paths.runs_dir()
         run_id = run_id or new_run_id(experiment)
+        if not RUN_ID_RE.match(run_id):
+            raise ValueError(f"run_id invalide '{run_id}' — lettres, chiffres, '_', '-' ou '.' "
+                             "uniquement")
         run_dir = base / run_id
         previous = read_json(run_dir / "run.json")
         if isinstance(previous, dict) and previous.get("status") not in (None, "queued"):
@@ -178,6 +232,9 @@ class Run:
             "progress": None,
             "summary": {},
             "error": None,
+            "pid": os.getpid(),
+            "proc_start": _process_start(os.getpid()),
+            "user": launch_user(launch_info),
         }
         run = cls(run_dir, manifest)
         run._write_manifest(force=True)
@@ -367,11 +424,7 @@ class Run:
         """Write ``eval/<checkpoint>__<benchmark>.json`` and an ``eval`` event."""
         result = dict(result)
         result.setdefault("run_id", self.run_id)
-        result.setdefault("created_at", utc_iso())
-        checkpoint = safe_name(result.get("checkpoint", "unknown"))
-        benchmark = safe_name(result.get("benchmark", "unknown"))
-        path = self.dir / "eval" / f"{checkpoint}__{benchmark}.json"
-        atomic_write_json(path, result)
+        path = write_eval_file(self.dir, result)
         self.event("eval", checkpoint=result.get("checkpoint"), benchmark=result.get("benchmark"),
                    summary=result.get("summary") or {}, path=path.relative_to(self.dir).as_posix())
         return path
@@ -485,6 +538,14 @@ class Run:
 
     def _on_sigterm(self, signum: int, frame: Any) -> None:
         self._terminated = True
+        # A cancellation signals the whole process group: helper processes (DataLoader
+        # workers) die at the same time and torch's SIGCHLD handler would then raise a
+        # RuntimeError in the middle of our shutdown (before the emergency checkpoint).
+        # Their death is expected here, so SIGCHLD goes back to its default.
+        try:
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        except (ValueError, OSError, AttributeError):
+            pass
         if not self._finished:
             raise RunTerminated("SIGTERM reçu")
 

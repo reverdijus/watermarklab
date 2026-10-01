@@ -31,6 +31,9 @@ export interface ScatterParetoProps {
   yConstraint?: Constraint | null;
   /** Point to emphasise (e.g. current run). */
   highlightId?: string | null;
+  /** Hard axis bounds (e.g. 1 for ratios), applied on top of auto-scaling. */
+  xMax?: number;
+  yMax?: number;
   onPointClick?: (point: ParetoPoint) => void;
   /** Draw the Pareto front (default true). */
   showFront?: boolean;
@@ -54,6 +57,8 @@ export function ScatterPareto({
   xConstraint,
   yConstraint,
   highlightId,
+  xMax,
+  yMax,
   onPointClick,
   showFront = true,
   height = 380,
@@ -70,9 +75,10 @@ export function ScatterPareto({
     const fy = yFormatter ?? ((v: number) => formatSignificant(v, 4));
     const feasible = (p: ParetoPoint) =>
       (!xConstraint || satisfies(p.x, xConstraint)) && (!yConstraint || satisfies(p.y, yConstraint));
-    const frontIdx = showFront ? paretoFront(valid.filter(feasible), xDirection, yDirection) : [];
-    const feasiblePts = valid.filter(feasible);
-    const frontPts = frontIdx.map((i) => feasiblePts[i]);
+    // The front is a property of the whole set of trade-offs: constraints only fade the
+    // points outside the threshold and pick the "best under constraint" (highlightId).
+    const frontIdx = showFront ? paretoFront(valid, xDirection, yDirection) : [];
+    const frontPts = frontIdx.map((i) => valid[i]);
     const frontIds = new Set(frontPts.map((p) => p.id));
 
     // Stable group → color mapping (alphabetical, so colors follow entities).
@@ -90,10 +96,11 @@ export function ScatterPareto({
         point: p,
         symbolSize: isHi ? 16 : onFront ? 11 : 8,
         itemStyle: {
-          color: ok ? color : withAlpha(color, 0.3),
-          borderColor: isHi ? t.text : t.surface,
+          // Infeasible points stay readable (hollow-ish), just clearly secondary.
+          color: ok ? color : withAlpha(color, 0.45),
+          borderColor: isHi ? t.text : ok ? t.surface : color,
           borderWidth: isHi ? 2.5 : 1.5,
-          opacity: ok ? 0.95 : 0.6,
+          opacity: ok ? 0.95 : 0.85,
         },
         label: isHi
           ? { show: true, formatter: p.label ?? p.id, position: "top", color: t.text, fontSize: 11, distance: 8 }
@@ -102,6 +109,7 @@ export function ScatterPareto({
     };
 
     const series: Record<string, unknown>[] = groups.map((g) => ({
+      id: `scatter-${g}`,
       type: "scatter",
       name: g,
       data: valid.filter((p) => (p.group ?? "Runs") === g).map(toDatum),
@@ -111,13 +119,15 @@ export function ScatterPareto({
 
     if (frontPts.length > 1) {
       series.push({
+        id: "pareto-front",
         type: "line",
         name: "Front de Pareto",
         data: frontPts.map((p) => [p.x, p.y]),
         showSymbol: false,
         silent: true,
-        lineStyle: { color: t.accent, width: 1.5, type: [6, 4] },
-        itemStyle: { color: t.accent },
+        // Neutral ink so the front never impersonates a series color.
+        lineStyle: { color: t.text, width: 1.5, type: [6, 4], opacity: 0.7 },
+        itemStyle: { color: t.text },
         z: 2,
         tooltip: { show: false },
       });
@@ -148,7 +158,7 @@ export function ScatterPareto({
     }
 
     return {
-      grid: { left: 12, right: 24, top: groups.length > 1 || frontPts.length > 1 ? 36 : 16, bottom: 30, containLabel: true },
+      grid: { left: 12, right: 24, top: groups.length > 1 || frontPts.length > 1 ? 58 : 34, bottom: 30, containLabel: true },
       legend: groups.length > 1 || frontPts.length > 1 ? { ...legendBase(t) } : { show: false },
       tooltip: {
         ...tooltipBase(t),
@@ -166,7 +176,7 @@ export function ScatterPareto({
                 `<div style="display:flex;justify-content:space-between;gap:18px"><span style="color:${t.muted}">${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`,
             )
             .join("");
-          const badge = frontIds.has(d.id) ? ` <span style="color:${t.accent};font-size:11px">· front de Pareto</span>` : "";
+          const badge = frontIds.has(d.id) ? ` <span style="color:${t.muted};font-size:11px">· front de Pareto</span>` : "";
           return `<div style="font-weight:600;margin-bottom:4px">${tooltipDot(colorOf.get(d.group ?? "Runs")!)}${escapeHtml(d.label ?? d.id)}${badge}</div>${rows}`;
         },
       },
@@ -177,6 +187,7 @@ export function ScatterPareto({
         nameLocation: "middle",
         nameGap: 28,
         scale: true,
+        max: xMax,
         axisLabel: { ...ax.axisLabel, formatter: (v: number) => fx(v) },
       },
       yAxis: {
@@ -184,13 +195,16 @@ export function ScatterPareto({
         type: "value",
         name: yLabel,
         nameLocation: "end",
+        nameGap: 14,
+        nameTextStyle: { ...ax.nameTextStyle, align: "left" },
         scale: true,
+        max: yMax,
         axisLine: { show: false },
         axisLabel: { ...ax.axisLabel, formatter: (v: number) => fy(v) },
       },
       series,
     } as EChartsOption;
-  }, [t, valid, xLabel, yLabel, xDirection, yDirection, xFormatter, yFormatter, xConstraint, yConstraint, highlightId, showFront]);
+  }, [t, valid, xLabel, yLabel, xDirection, yDirection, xFormatter, yFormatter, xConstraint, yConstraint, highlightId, xMax, yMax, showFront]);
 
   return (
     <EChart

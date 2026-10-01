@@ -10,8 +10,10 @@ import { useHealth } from "../../lib/queries";
 
 /**
  * Window layout: sidebar + scrollable content, draggable title strip for the
- * frameless macOS window. The root carries `data-app-ready` once mounted
- * (used by the Electron self-test).
+ * frameless macOS window. The root carries `data-app-ready` once mounted AND
+ * the backend answered `/api/health` **with** `workspace`, which it only returns to a
+ * request carrying the session token — so the flag proves the token reached the renderer
+ * (used by the Electron self-test and the render check).
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useLocalStorage("wmlab.sidebar.collapsed", false);
@@ -32,7 +34,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const offline = health.isError && health.failureCount > 0;
 
   return (
-    <div data-app-ready={ready ? "true" : undefined} className="flex h-full w-full overflow-hidden bg-canvas text-fg">
+    <div data-app-ready={ready && health.isSuccess && !!health.data?.workspace ? "true" : undefined} className="flex h-full w-full overflow-hidden bg-canvas text-fg">
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       <main className="relative flex min-w-0 flex-1 flex-col">
         {/* Title strip: draggable, hosts the sidebar toggle when collapsed. */}

@@ -21,7 +21,16 @@ export interface TabsProps<T extends string> {
 /** Underlined tab bar (page-level navigation between panels). */
 export function Tabs<T extends string>({ items, value, onChange, className }: TabsProps<T>) {
   return (
-    <div role="tablist" className={clsx("no-drag flex items-center gap-1 overflow-x-auto border-b border-border", className)}>
+    // The bottom rule is an inset shadow (not a border): the tabs sit exactly on it without
+    // a negative margin, so nothing overflows vertically and `overflow-x-auto` (which implies
+    // `overflow-y: auto`) never shows a stray vertical scrollbar.
+    <div
+      role="tablist"
+      className={clsx(
+        "no-drag flex items-center gap-0.5 overflow-x-auto overflow-y-hidden shadow-[inset_0_-1px_0_0_var(--color-border)]",
+        className,
+      )}
+    >
       {items.map((item) => {
         const active = item.id === value;
         const Icon = item.icon;
@@ -34,7 +43,7 @@ export function Tabs<T extends string>({ items, value, onChange, className }: Ta
             disabled={item.disabled}
             onClick={() => onChange(item.id)}
             className={clsx(
-              "relative -mb-px inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 text-[13.5px] transition-colors",
+              "relative inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap px-2 text-[13.5px] transition-colors",
               "border-b-2 disabled:opacity-40",
               active ? "border-accent font-medium text-fg" : "border-transparent text-muted hover:text-fg",
             )}

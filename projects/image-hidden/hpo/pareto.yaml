@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Plan HPO « pareto » — projet image-hidden · format : ARCHITECTURE.md §5.4
+#
+# Étude MULTI-objectif : on ne cherche pas « le » meilleur réglage mais le FRONT DE PARETO
+# imperceptibilité (val/psnr) × robustesse (val/bit_acc_mean) : l'ensemble des compromis où
+# l'on ne peut plus gagner sur un axe sans perdre sur l'autre. L'app l'affiche dans le détail
+# de l'étude ; on choisit ensuite le point qui respecte la contrainte du projet (PSNR ≥ 38 dB).
+#
+# Plus d'un objectif ⇒ pas de pruning (les essais vont tous au bout) : budget à surveiller.
+# Essai éclair : .venv/bin/python -m wmlab.cli hpo projects/image-hidden/hpo/pareto.yaml --smoke
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: pareto
+experiment: baseline
+description: "Front de Pareto PSNR × bit_acc_mean : force du résidu, poids image final, LR"
+hypothesis: >-
+  La force du résidu (model.params.strength) et le poids image de l'affinage pilotent
+  l'essentiel du compromis ; le front doit contenir un point ≥ 38 dB avec bit_acc_mean ≥ 0,7.
+
+# NSGA-II : algorithme génétique multi-objectif. population_size = essais par génération
+# (budget ≥ 3 générations pour que l'évolution serve à quelque chose).
+sampler: {name: nsga2, params: {population_size: 12}}
+pruner: {name: none}
+
+objectives:
+  - {metric: val/psnr, direction: maximize}
+  - {metric: val/bit_acc_mean, direction: maximize}
+constraints: []                      # pas de contrainte : on veut voir tout le front
+
+space:
+  model.params.strength: {type: float, low: 0.25, high: 2.0, log: true}   # amplitude du résidu
+  phases.2.loss_weights.img: {type: float, low: 10.0, high: 3000.0, log: true}   # PSNR ~25 → ~45 dB
+  optimizer.lr: {type: float, low: 3.0e-4, high: 3.0e-3, log: true}
+
+# 50 % des steps : le compromis final dépend beaucoup de l'affinage, un proxy trop court le
+# fausserait. Pas de benchmark par essai.
+fidelity:
+  steps_scale: 0.5
+  overrides:
+    phases.0.steps: 300              # warmup de décodage complet (voir lr_weights.yaml)
+    phases.0.lr.warmup_steps: 100
+    eval.final_benchmark: null
+
+budget: {max_trials: 36, max_hours: 6, max_eur: 40, parallel: 1}
+objective_agg: last

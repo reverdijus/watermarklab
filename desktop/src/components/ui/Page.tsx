@@ -15,7 +15,7 @@ export function Page({ children, width = "default", className }: PageProps) {
   return (
     <div
       className={clsx(
-        "mx-auto w-full px-10 pb-16 pt-8",
+        "mx-auto w-full px-6 pb-16 pt-4 xl:px-10",
         width === "default" && "max-w-[1200px]",
         width === "wide" && "max-w-[1480px]",
         className,
@@ -73,12 +73,12 @@ export interface SectionProps {
   className?: string;
 }
 
-/** Titled block inside a page. */
+/** Titled block inside a page (no outer margin: space sections with `space-y-10` or `mt-10`). */
 export function Section({ title, description, actions, children, className }: SectionProps) {
   return (
-    <section className={clsx("mt-9 first:mt-0", className)}>
+    <section className={className}>
       {(title || actions) && (
-        <div className="mb-3.5 flex items-end justify-between gap-4">
+        <div className="mb-3.5 flex min-h-7 items-end justify-between gap-4">
           <div className="min-w-0">
             {title && <h2 className="font-serif text-[19px] leading-tight text-fg">{title}</h2>}
             {description && <p className="mt-1 text-[13px] text-muted">{description}</p>}

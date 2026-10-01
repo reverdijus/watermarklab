@@ -1,7 +1,8 @@
 import clsx from "clsx";
 import { useMemo, useRef, useState, type MouseEvent } from "react";
-import { formatCompact, formatInt, formatNumber, formatPercent } from "../lib/format";
-import type { PhasePlanPreview, PhasePreview } from "../lib/types";
+import { formatCompact, formatInt, formatPercent } from "../lib/format";
+import type { PhasePlanPreview } from "../lib/types";
+import { buildRows, valueAt, type CurveRow } from "./phasePlan";
 
 /**
  * Curriculum visualisation: proportional phase bar (names, steps, progress),
@@ -13,6 +14,8 @@ export interface PhaseTimelineProps {
   plan: PhasePlanPreview;
   /** Current global step (draws the progress marker). */
   currentStep?: number | null;
+  /** The run is still running: the current phase is labelled "en cours" (default true). */
+  live?: boolean;
   /** Show the aligned curves (default true). */
   curves?: boolean;
   /** Show the attack list per phase (default true). */
@@ -20,79 +23,41 @@ export interface PhaseTimelineProps {
   className?: string;
 }
 
-type Pt = [number, number];
-
 const phaseColor = (i: number) => `var(--chart-${(i % 6) + 1})`;
 const tint = (i: number, pct: number) => `color-mix(in srgb, ${phaseColor(i)} ${pct}%, transparent)`;
-
-/** Linear interpolation of a [step, value] series at `step`. */
-function valueAt(series: Pt[], step: number): number | null {
-  if (!series.length) return null;
-  if (step <= series[0][0]) return series[0][1];
-  for (let i = 1; i < series.length; i++) {
-    const [x1, y1] = series[i];
-    if (step <= x1) {
-      const [x0, y0] = series[i - 1];
-      return x1 === x0 ? y1 : y0 + ((y1 - y0) * (step - x0)) / (x1 - x0);
-    }
-  }
-  return series[series.length - 1][1];
-}
-
-interface CurveRow {
-  id: string;
-  label: string;
-  lines: { name: string; color: string; points: Pt[] }[];
-  format: (v: number) => string;
-}
-
-function buildRows(phases: PhasePreview[]): CurveRow[] {
-  const concat = (pick: (p: PhasePreview) => Pt[] | undefined) =>
-    phases.flatMap((p) => pick(p) ?? []).sort((a, b) => a[0] - b[0]);
-  const rows: CurveRow[] = [
-    {
-      id: "lr",
-      label: "Facteur de LR",
-      lines: [{ name: "LR", color: "var(--chart-2)", points: concat((p) => p.lr) }],
-      format: (v) => `×${formatNumber(v, { maxDigits: 3 })}`,
-    },
-    {
-      id: "strength",
-      label: "Force d'attaque",
-      lines: [{ name: "Force", color: "var(--chart-1)", points: concat((p) => p.attack_strength) }],
-      format: (v) => formatPercent(v, 0),
-    },
-  ];
-  const terms = [...new Set(phases.flatMap((p) => Object.keys(p.loss_weights ?? {})))].sort();
-  if (terms.length) {
-    rows.push({
-      id: "weights",
-      label: "Poids des pertes",
-      lines: terms.map((term, i) => ({
-        name: term,
-        color: `var(--chart-${((i + 2) % 6) + 1})`,
-        points: concat((p) => p.loss_weights?.[term]),
-      })),
-      format: (v) => formatNumber(v, { maxDigits: 3 }),
-    });
-  }
-  return rows.filter((r) => r.lines.some((l) => l.points.length > 0));
-}
 
 const VIEW_W = 1000;
 const VIEW_H = 100;
 
-function Curve({ row, total }: { row: CurveRow; total: number }) {
-  const all = row.lines.flatMap((l) => l.points.map((p) => p[1]));
-  const max = Math.max(1e-9, ...all);
-  const min = Math.min(0, ...all);
+const Y_BOTTOM = VIEW_H - 6;
+const Y_TOP = 8;
+
+/** Vertical scale shared by a row's lines: linear from 0, or log10 (see `CurveRow.logScale`). */
+function scaleOf(values: number[], log: boolean | undefined): (v: number) => number {
+  const positive = values.filter((v) => v > 0);
+  if (log && positive.length) {
+    // Log scale from a little under the smallest positive value to the largest; v ≤ 0 sits on the floor.
+    const hi = Math.log10(Math.max(...positive));
+    const lo = Math.min(Math.log10(Math.min(...positive)) - 0.3, hi - 0.3);
+    return (v: number) => (v <= 0 ? Y_BOTTOM : Y_BOTTOM - ((Math.log10(v) - lo) / (hi - lo)) * (Y_BOTTOM - Y_TOP));
+  }
+  const max = Math.max(1e-9, ...values);
+  const min = Math.min(0, ...values);
   const span = max - min || 1;
+  return (v: number) => Y_BOTTOM - ((v - min) / span) * (Y_BOTTOM - Y_TOP);
+}
+
+function Curve({ row, total }: { row: CurveRow; total: number }) {
+  const y = scaleOf(
+    row.lines.flatMap((l) => l.points.map((p) => p[1])),
+    row.logScale,
+  );
   const x = (s: number) => (s / total) * VIEW_W;
-  const y = (v: number) => VIEW_H - 6 - ((v - min) / span) * (VIEW_H - 14);
   return (
     <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full overflow-visible">
-      {row.lines.map((l) =>
-        l.points.length ? (
+      {row.lines.map((l) => {
+        if (!l.points.length) return null;
+        return (
           <g key={l.name}>
             <path
               d={`M${x(l.points[0][0])},${VIEW_H} ${l.points.map((p) => `L${x(p[0]).toFixed(2)},${y(p[1]).toFixed(2)}`).join(" ")} L${x(l.points[l.points.length - 1][0])},${VIEW_H} Z`}
@@ -108,14 +73,14 @@ function Curve({ row, total }: { row: CurveRow; total: number }) {
               vectorEffect="non-scaling-stroke"
             />
           </g>
-        ) : null,
-      )}
+        );
+      })}
     </svg>
   );
 }
 
 /** The curriculum visualisation. */
-export function PhaseTimeline({ plan, currentStep, curves = true, attacks = true, className }: PhaseTimelineProps) {
+export function PhaseTimeline({ plan, currentStep, live = true, curves = true, attacks = true, className }: PhaseTimelineProps) {
   const total = Math.max(1, plan.total_steps);
   const phases = plan.phases;
   const rows = useMemo(() => (curves ? buildRows(phases) : []), [phases, curves]);
@@ -173,14 +138,14 @@ export function PhaseTimeline({ plan, currentStep, curves = true, attacks = true
                     <span className={clsx(active && "font-semibold")}>{p.name}</span>
                   </div>
                   <div className="relative truncate text-[11px] leading-tight text-muted">
-                    {formatCompact(p.steps)} steps{active ? " · en cours" : ""}
+                    {formatCompact(p.steps)} steps{active ? (live ? " · en cours" : " · arrêté ici") : ""}
                   </div>
                 </div>
               );
             })}
           </div>
           {/* Boundary ticks */}
-          <div className="relative mt-1 h-4 text-[10.5px] text-faint">
+          <div className="relative mt-1 h-4 text-[10.5px] text-muted">
             <span className="absolute left-0">0</span>
             {phases.map((p, i) => (
               <span
@@ -209,6 +174,7 @@ export function PhaseTimeline({ plan, currentStep, curves = true, attacks = true
         <div key={row.id} className="mt-2.5 flex items-stretch gap-3">
           <div className={clsx(LABEL_W, "shrink-0 pt-1")}>
             <div className="text-[12px] text-muted">{row.label}</div>
+            {row.note && <div className="text-[10.5px] leading-tight text-muted">{row.note}</div>}
             {row.lines.length > 1 && (
               <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
                 {row.lines.map((l) => (
@@ -247,7 +213,7 @@ export function PhaseTimeline({ plan, currentStep, curves = true, attacks = true
               >
                 <div className="flex flex-wrap gap-1">
                   {p.attacks.length === 0 ? (
-                    <span className="truncate text-[11.5px] italic text-faint">identité</span>
+                    <span className="truncate text-[11.5px] italic text-muted">aucune (identité)</span>
                   ) : (
                     p.attacks.map((a, k) => (
                       <span
@@ -276,10 +242,13 @@ export function PhaseTimeline({ plan, currentStep, curves = true, attacks = true
             {rows.map((row) =>
               row.lines.map((l) => {
                 const v = valueAt(l.points, hover.step);
-                return v == null ? null : (
+                if (v == null) return null;
+                const noAttack = row.id === "strength" && hoverPhase.attacks.length === 0;
+                return (
                   <span key={`${row.id}-${l.name}`} className="inline-flex items-center gap-1">
                     <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: l.color }} />
-                    {row.lines.length > 1 ? l.name : row.label} <span className="tabular text-fg">{row.format(v)}</span>
+                    {row.lines.length > 1 ? l.name : row.label}{" "}
+                    {noAttack ? <span className="italic">aucune attaque</span> : <span className="tabular text-fg">{row.format(v)}</span>}
                   </span>
                 );
               }),

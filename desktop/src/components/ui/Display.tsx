@@ -99,25 +99,48 @@ export interface KpiProps {
 
 /** Stat tile: label, big value, optional sub-line and progress. */
 export function Kpi({ label, value, sub, icon: Icon, progress, progressTone = "accent", hint, loading, onClick, className }: KpiProps) {
+  // Truncated label / sub lines keep their full text as a native tooltip.
+  const asTitle = (node: ReactNode) => (typeof node === "string" ? node : undefined);
   const body = (
     <div
       onClick={onClick}
+      // A clickable tile is a button for the keyboard (Enter / Space) and assistive tech.
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
       className={clsx(
         "flex h-full flex-col rounded-xl border border-border bg-surface px-4 py-3.5 shadow-sm",
-        onClick && "cursor-pointer transition-colors hover:border-border-strong",
+        onClick && "no-drag cursor-pointer transition-colors hover:border-border-strong",
         className,
       )}
     >
       <div className="flex items-center gap-1.5 text-[12.5px] text-muted">
         {Icon && <Icon size={14} strokeWidth={1.75} aria-hidden />}
-        <span className="truncate">{label}</span>
+        <span className="truncate" title={asTitle(label)}>
+          {label}
+        </span>
       </div>
       {loading ? (
         <Skeleton className="mt-2 h-7 w-24" />
       ) : (
-        <div className="tabular mt-1 truncate font-serif text-[26px] leading-tight text-fg">{value}</div>
+        <div className="tabular mt-1 truncate font-serif text-[26px] leading-tight text-fg" title={asTitle(value)}>
+          {value}
+        </div>
       )}
-      {sub && <div className="mt-0.5 truncate text-[12.5px] text-muted">{sub}</div>}
+      {sub && (
+        <div className="mt-0.5 truncate text-[12.5px] text-muted" title={asTitle(sub)}>
+          {sub}
+        </div>
+      )}
       {progress !== undefined && <ProgressBar value={progress} tone={progressTone} size="xs" className="mt-2.5" />}
     </div>
   );

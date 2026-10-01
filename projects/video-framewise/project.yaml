@@ -1,0 +1,19 @@
+# Projet « Vidéo — frame par frame » — format : ARCHITECTURE.md §5.2
+#
+# Watermarking vidéo en appliquant un modèle IMAGE à chaque frame (même message partout) ;
+# l'extracteur agrège les logits des frames. Tenseurs [B, F, 3, H, W] dans [0, 1].
+name: video-framewise                # = nom du dossier projects/video-framewise
+title: "Vidéo — frame par frame"
+modality: video
+description: >-
+  Baseline vidéo : HiDDeN appliqué frame par frame (video_framewise), robuste à H.264, aux
+  pertes de frames et au JPEG par frame ; perte temporelle contre le scintillement.
+  Stratégie visée : pré-entraînement image puis fine-tune vidéo (voir notes.md).
+message_bits: 32
+default_benchmark: video_v1
+
+objectives:
+  quality:    {metric: psnr, direction: maximize, label: "PSNR (dB)", constraint: ">= 36"}
+  robustness: {metric: bit_acc_mean, direction: maximize, label: "Bit acc. moyenne"}
+
+tags: [video, baseline, framewise]

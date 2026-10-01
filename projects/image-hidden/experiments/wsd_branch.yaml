@@ -1,0 +1,120 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Expérience « wsd_branch » — projet image-hidden (image, 48 bits)
+# Format : ARCHITECTURE.md §5.3
+#
+# Planning WSD (Warmup → Stable → Decay) et BRANCHEMENT de la décroissance.
+#
+# Pourquoi : avec un cosinus, la durée totale doit être fixée d'avance et chaque durée testée
+# coûte un run complet. Avec WSD, le LR reste constant sur un long plateau ; la décroissance
+# finale (courte, ~10–20 % des steps) fait gagner l'essentiel de la performance. On peut donc
+# entraîner UN plateau, puis brancher plusieurs décroissances depuis son checkpoint de fin :
+#   - durées de décroissance différentes (200 vs 600 steps) ;
+#   - poids de qualité / attaques différents pendant la décroissance ;
+#   - reprise plus tard si le plateau doit être prolongé (nouveau run branché sur le plateau).
+#
+# Les trois phases ci-dessous = W, S et D. Le schedule `wsd` d'une phase fait décroître le LR
+# linéairement vers min_factor sur la fraction finale `decay_fraction` de cette phase ; ici la
+# phase « decay » EST la décroissance, donc decay_fraction: 1.0.
+# Variante tout-en-un (sans branchement possible) : une seule phase avec
+#   lr: {schedule: wsd, warmup_steps: 100, decay_fraction: 0.2, min_factor: 0.0}
+#
+# Vérifier : .venv/bin/python -m wmlab.cli validate projects/image-hidden/experiments/wsd_branch.yaml
+# Essai    : .venv/bin/python -m wmlab.cli train projects/image-hidden/experiments/wsd_branch.yaml --smoke
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+name: wsd_branch
+description: "WSD : warmup, plateau à LR constant, décroissance courte branchable depuis le plateau"
+hypothesis: >-
+  Une décroissance linéaire courte (20 % des steps) après un plateau à LR constant égale ou
+  dépasse le cosinus de la baseline, et permet de comparer plusieurs décroissances sans
+  ré-entraîner le plateau (≈ 80 % du coût).
+seed: 0
+
+model:
+  name: hidden
+  params: {channels: 64, enc_blocks: 4, dec_blocks: 7, strength: 1.0}
+
+data:
+  train:
+    dataset: synthetic               # réel : image_folder + root: "@coco2017"
+    params: {modality: image, size: 64, num_items: 2048, seed: 0}
+    preprocess: [{name: hflip, params: {p: 0.5}}]
+  val:
+    dataset: synthetic
+    params: {modality: image, size: 64, num_items: 128, seed: 1}
+    preprocess: []
+  batch_size: 16
+  num_workers: 2
+
+optimizer: {name: adamw, lr: 1.0e-3, weight_decay: 1.0e-4, betas: [0.9, 0.999], grad_clip: 1.0}
+
+loss:
+  terms:
+    msg: {name: message_bce, weight: 1.0}
+    img: {name: mse, weight: 100.0}        # échelle : voir baseline.yaml
+
+phases:
+  # W — warmup du LR, décodage sans attaque.
+  - name: warmup_decode
+    steps: 250
+    lr: {schedule: linear_warmup, warmup_steps: 100}
+    loss_weights: {img: 0.1}
+    attacks: []
+
+  # S — plateau à LR constant. Les attaques atteignent leur force maximale à 60 % de la phase
+  # (end: 0.6) puis y restent : la fin du plateau est « stationnaire », condition pour que
+  # n'importe quel checkpoint du plateau soit un bon point de départ de décroissance.
+  - name: stable
+    steps: 950
+    lr: {schedule: constant}
+    loss_weights: {img: {ramp: [0.1, 100.0], end: 0.6}}
+    attacks:
+      - {name: identity, p: 0.5}
+      - {name: jpeg_diff, params: {quality: 50}}
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+    attack_strength: {ramp: [0.0, 1.0], end: 0.6}
+
+  # D — décroissance du LR jusqu'à 0 ; on en profite pour pousser la qualité (poids image ↑).
+  - name: decay
+    steps: 300
+    lr: {schedule: wsd, decay_fraction: 1.0, min_factor: 0.0}
+    loss_weights: {img: {ramp: [100.0, 300.0]}}
+    attacks:
+      - {name: jpeg, params: {quality: 50}}          # vrai JPEG (STE automatique)
+      - {name: gaussian_blur, params: {sigma: 2.0}}
+      - {name: crop, params: {area: 0.5}}
+    attack_strength: 1.0
+
+eval:
+  every_steps: 250
+  val_batches: 8
+  val_attacks:
+    - {label: jpeg50, name: jpeg, params: {quality: 50}}
+    - {label: blur, name: gaussian_blur, params: {sigma: 2.0}}
+    - {label: crop50, name: crop, params: {area: 0.5}}
+  final_benchmark: {benchmark: image_v1, checkpoints: [last]}
+
+checkpoint:
+  every_steps: 500
+  keep_last: 2
+  keep_best: {"val/bit_acc_mean": max, "val/psnr": max}
+  at_phase_end: true                 # INDISPENSABLE ici : crée « phase_end:stable »
+
+samples: {every_steps: 500, count: 4}
+resources: {device: auto, precision: auto, compile: false}
+
+# ── Branchement ─────────────────────────────────────────────────────────────────────────────
+# 1) Lancer ce fichier tel quel (init_from: null) : c'est le run « tronc » (W + S + D).
+# 2) Copier le fichier (wmlab new experiment image-hidden wsd_decay600 --from wsd_branch),
+#    modifier UNIQUEMENT la phase « decay » (steps: 600, poids, attaques…) et remplir :
+#
+# init_from:
+#   run: "20261001-120000-wsd-branch-3fa2"     # run_id du tronc (onglet Runs de l'app)
+#   checkpoint: "phase_end:stable"              # fin du plateau (ou "step_000500", "best:val/bit_acc_mean")
+#   start_phase: decay                          # on ne ré-entraîne que la décroissance
+#   load_optimizer: true                        # garder les moments d'Adam du plateau
+#
+#    Le nouveau run démarre au step global 1200 (= warmup + plateau), porte `parent` dans son
+#    run.json et apparaît rattaché au tronc dans l'app. Coût : 300–600 steps au lieu de 1 500.
+init_from: null
+tags: [wsd, branch]
