@@ -52,11 +52,24 @@ class FileAccessError(Exception):
 
 
 # -- YAML helpers -----------------------------------------------------------------------------
-def read_raw(path: Path) -> Any:
-    """Parsed YAML content of ``path`` (``None`` if unreadable/invalid)."""
+def _regular_file(path: Path) -> bool:
+    """True for a plain file reached without symlink (a symlink committed in the repository
+    must never make the server read ``/etc/wmlab/env`` or the SSH key)."""
     try:
+        return path.is_file() and not path.is_symlink() and not any(
+            parent.is_symlink() for parent in path.parents if parent != path.anchor)
+    except OSError:
+        return False
+
+
+def read_raw(path: Path) -> Any:
+    """Parsed YAML content of ``path`` (``None`` if unreadable, invalid, a symlink, above
+    ``MAX_FILE_BYTES`` or pathological — deep nesting)."""
+    try:
+        if not _regular_file(path) or path.stat().st_size > MAX_FILE_BYTES:
+            return None
         return yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+    except (OSError, yaml.YAMLError, UnicodeDecodeError, RecursionError, MemoryError):
         return None
 
 
@@ -66,17 +79,20 @@ def _raw_dict(path: Path) -> dict[str, Any]:
 
 
 def yaml_files(folder: Path) -> list[Path]:
-    if not folder.is_dir():
+    if not folder.is_dir() or folder.is_symlink():
         return []
-    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix in YAML_SUFFIXES)
+    return sorted(p for p in folder.iterdir()
+                  if p.is_file() and not p.is_symlink() and p.suffix in YAML_SUFFIXES)
 
 
 def _errors(path: Path) -> list[dict[str, str]]:
     try:
+        if path.stat().st_size > MAX_FILE_BYTES:
+            return [{"loc": "", "msg": "fichier trop volumineux (1 Mo maximum)"}]
         return [{"loc": str(e.get("loc", "")), "msg": str(e.get("msg", ""))}
                 for e in validate_file(path)]
-    except Exception as exc:  # validation must never break a listing
-        return [{"loc": "", "msg": f"validation impossible : {exc}"}]
+    except (Exception, RecursionError) as exc:  # validation must never break a listing
+        return [{"loc": "", "msg": f"validation impossible : {type(exc).__name__}"}]
 
 
 def _validation(errors: list[dict[str, str]]) -> dict[str, Any]:
@@ -89,14 +105,15 @@ def project_dirs(workspace: Path) -> list[Path]:
     if not projects.is_dir():
         return []
     return sorted(p for p in projects.iterdir()
-                  if p.is_dir() and not p.name.startswith(".") and (p / "project.yaml").is_file())
+                  if p.is_dir() and not p.is_symlink() and not p.name.startswith(".")
+                  and _regular_file(p / "project.yaml"))
 
 
 def project_dir(workspace: Path, name: str) -> Path | None:
     if not name or "/" in name or "\\" in name or name.startswith("."):
         return None
     folder = workspace / "projects" / name
-    return folder if (folder / "project.yaml").is_file() else None
+    return folder if not folder.is_symlink() and _regular_file(folder / "project.yaml") else None
 
 
 def project_data(folder: Path) -> dict[str, Any]:
@@ -134,8 +151,11 @@ def project_objectives(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def project_notes(folder: Path) -> str:
+    path = folder / "notes.md"
     try:
-        return (folder / "notes.md").read_text(encoding="utf-8")
+        if not _regular_file(path) or path.stat().st_size > MAX_FILE_BYTES:
+            return ""
+        return path.read_text(encoding="utf-8")
     except OSError:
         return ""
 

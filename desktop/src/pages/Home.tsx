@@ -22,7 +22,7 @@ import { errorMessage } from "../lib/api";
 import { formatEur, formatHours, formatRelative, plural, shortId } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { formatMetric, metricLabel, pickKeyMetrics, qualityMetricFor } from "../lib/metrics";
-import { useOverview } from "../lib/queries";
+import { useOverview, usePermissions } from "../lib/queries";
 import { isPrunedTrial, MODALITY_LABELS, projectPath, runPath } from "../lib/runs";
 import type { ProjectSummary, RunSummary } from "../lib/types";
 
@@ -113,6 +113,7 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
 export default function Home() {
   const overview = useOverview();
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   const navigate = useNavigate();
   const now = useNow(60000);
   const data = overview.data;
@@ -166,9 +167,11 @@ export default function Home() {
             <Button icon={Activity} to="/runs">
               Tous les runs
             </Button>
-            <Button variant="primary" icon={Rocket} onClick={() => openLaunch()}>
-              Nouveau lancement
-            </Button>
+            {canWrite && (
+              <Button variant="primary" icon={Rocket} onClick={() => openLaunch()}>
+                Nouveau lancement
+              </Button>
+            )}
           </>
         }
       />
@@ -251,11 +254,17 @@ export default function Home() {
               compact
               icon={Rocket}
               title="Aucun entraînement en cours"
-              description="Lancez une expérience en local ou sur un serveur GPU : sa progression apparaîtra ici."
+              description={
+                canWrite
+                  ? "Lancez une expérience en local ou sur un serveur GPU : sa progression apparaîtra ici."
+                  : "Les entraînements lancés par l'équipe apparaîtront ici avec leur progression."
+              }
               action={
-                <Button variant="primary" icon={Plus} onClick={() => openLaunch()}>
-                  Nouveau lancement
-                </Button>
+                canWrite ? (
+                  <Button variant="primary" icon={Plus} onClick={() => openLaunch()}>
+                    Nouveau lancement
+                  </Button>
+                ) : undefined
               }
             />
           </Card>

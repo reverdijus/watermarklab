@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { useHotkey } from "../../lib/hooks";
+import { usePermissions } from "../../lib/queries";
 import type { InitFrom } from "../../lib/types";
 import { LaunchDialog } from "./LaunchDialog";
 
@@ -34,28 +35,36 @@ export interface LaunchContextValue {
 
 const LaunchContext = createContext<LaunchContextValue | null>(null);
 
-/** Global "Nouveau lancement" dialog (Cmd+N) available through `useLaunch()`. */
+/**
+ * Global "Nouveau lancement" dialog (Cmd+N) available through `useLaunch()`. A member
+ * (read-only, §12.6) never gets it: `openLaunch` is a no-op and ⌘N is disabled.
+ */
 export function LaunchProvider({ children }: { children: ReactNode }) {
+  const { canWrite } = usePermissions();
   const [state, setState] = useState<{ open: boolean; preset: LaunchPreset; seq: number }>({
     open: false,
     preset: {},
     seq: 0,
   });
 
-  const openLaunch = useCallback((preset: LaunchPreset = {}) => {
-    setState((s) => ({ open: true, preset, seq: s.seq + 1 }));
-  }, []);
+  const openLaunch = useCallback(
+    (preset: LaunchPreset = {}) => {
+      if (!canWrite) return;
+      setState((s) => ({ open: true, preset, seq: s.seq + 1 }));
+    },
+    [canWrite],
+  );
   const closeLaunch = useCallback(() => setState((s) => ({ ...s, open: false })), []);
 
   // ⌘N while the dialog is already open must not remount it (the form would be reset).
-  useHotkey("mod+n", () => openLaunch(), { enabled: !state.open });
+  useHotkey("mod+n", () => openLaunch(), { enabled: !state.open && canWrite });
 
   const value = useMemo(() => ({ openLaunch, closeLaunch, isOpen: state.open }), [openLaunch, closeLaunch, state.open]);
 
   return (
     <LaunchContext.Provider value={value}>
       {children}
-      {state.open && <LaunchDialog key={state.seq} preset={state.preset} onClose={closeLaunch} />}
+      {state.open && canWrite && <LaunchDialog key={state.seq} preset={state.preset} onClose={closeLaunch} />}
     </LaunchContext.Provider>
   );
 }

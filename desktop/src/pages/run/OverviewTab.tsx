@@ -17,7 +17,7 @@ import { LineChart, type LineSeries } from "../../components/charts";
 import { PhaseTimeline } from "../../components/PhaseTimeline";
 import { formatDate, formatInt, formatRelative } from "../../lib/format";
 import { formatMetric, formatMetricAxis, metricLabel, qualityMetricFor } from "../../lib/metrics";
-import { useRunMetrics } from "../../lib/queries";
+import { usePermissions, useRunMetrics } from "../../lib/queries";
 import { STATUS_LABELS } from "../../lib/runs";
 import type { RunDetail, RunEvent, RunStatus } from "../../lib/types";
 
@@ -100,6 +100,8 @@ export function OverviewTab({ run, live }: { run: RunDetail; live: boolean }) {
 
   const spec = run.spec as { hypothesis?: string; description?: string };
   const events = [...run.events].sort((a, b) => b.t - a.t).slice(0, 14);
+  // Member (§9): no phase plan (`plan: null`) — no placeholder card either.
+  const { canViewCode } = usePermissions();
 
   return (
     <div className="space-y-6">
@@ -111,11 +113,11 @@ export function OverviewTab({ run, live }: { run: RunDetail; live: boolean }) {
           />
           <PhaseTimeline plan={run.plan} currentStep={run.progress?.step ?? null} live={live} />
         </Card>
-      ) : (
+      ) : canViewCode ? (
         <Card>
           <EmptyState compact icon={Info} title="Plan de phases indisponible" description="La spec résolue de ce run ne fournit pas d'aperçu du curriculum." />
         </Card>
-      )}
+      ) : null}
 
       {kpiKeys.length > 0 && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

@@ -8,7 +8,7 @@ import { errorMessage } from "../lib/api";
 import { formatDuration, formatInt, formatPercent, formatRelative, shortId } from "../lib/format";
 import { describeRetrieveResult, hasRetrievalIssue, retrievalNotice } from "../lib/hosted";
 import { formatMetric, metricInfo, metricLabel } from "../lib/metrics";
-import { useCancelJob, useSyncJob } from "../lib/queries";
+import { useCancelJob, usePermissions, useSyncJob } from "../lib/queries";
 import { isActiveStatus, JOB_KIND_LABELS, progressFraction, runEta, runPath, studyPath } from "../lib/runs";
 import type { Job, Progress, RunSummary } from "../lib/types";
 
@@ -183,8 +183,9 @@ function jobTarget(job: Job): string {
   return base.replace(/\.ya?ml$/, "");
 }
 
-/** Compact list of jobs with cancel / sync actions and links to their run or study. */
+/** Compact list of jobs with cancel / sync actions (admin) and links to their run or study. */
 export function JobList({ jobs, empty, className }: { jobs: Job[]; empty?: string; className?: string }) {
+  const { canWrite } = usePermissions();
   const cancel = useCancelJob();
   const sync = useSyncJob();
   const confirm = useConfirm();
@@ -248,10 +249,10 @@ export function JobList({ jobs, empty, className }: { jobs: Job[]; empty?: strin
               )}
             </div>
             <div className="flex shrink-0 items-center gap-0.5">
-              {job.host !== "local" && (
+              {canWrite && job.host !== "local" && (
                 <IconButton icon={RefreshCw} label="Synchroniser maintenant" size="sm" onClick={() => void onSync(job)} />
               )}
-              {active && <IconButton icon={Ban} label="Annuler le job" size="sm" onClick={() => void onCancel(job)} />}
+              {canWrite && active && <IconButton icon={Ban} label="Annuler le job" size="sm" onClick={() => void onCancel(job)} />}
               {link && (
                 <Link to={link} className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-hover hover:text-fg" aria-label="Ouvrir">
                   <ArrowUpRight size={15} strokeWidth={1.75} />

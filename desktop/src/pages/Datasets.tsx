@@ -25,7 +25,7 @@ import { experimentFromPath, toIdentifier } from "../components/analysis";
 import { errorMessage } from "../lib/api";
 import { plural } from "../lib/format";
 import { toastFileSaved } from "../components/saveToast";
-import { useDatasets, useSaveFile } from "../lib/queries";
+import { useDatasets, usePermissions, useSaveFile } from "../lib/queries";
 import { experimentPath, MODALITY_LABELS } from "../lib/runs";
 import type { DatasetInfo, Modality } from "../lib/types";
 
@@ -46,14 +46,14 @@ paths:
 `;
 }
 
-function UsedBy({ paths }: { paths: string[] }) {
+function UsedBy({ paths, links }: { paths: string[]; links: boolean }) {
   if (!paths.length) return <span className="text-faint">Aucune expérience</span>;
   return (
     <span className="flex flex-wrap gap-1.5">
       {paths.map((p) => {
         const exp = experimentFromPath(p);
         const label = exp ? `${exp.project}/${exp.experiment}` : p.replace(/\.ya?ml$/, "");
-        const to = exp ? experimentPath(exp.project, exp.experiment) : p.startsWith("benchmarks/") ? "/benchmarks" : null;
+        const to = !links ? null : exp ? experimentPath(exp.project, exp.experiment) : p.startsWith("benchmarks/") ? "/benchmarks" : null;
         return to ? (
           <Link key={p} to={to} className="no-drag rounded-md bg-surface-2 px-1.5 py-0.5 font-mono text-[11.5px] text-muted hover:text-fg">
             {label}
@@ -68,7 +68,8 @@ function UsedBy({ paths }: { paths: string[] }) {
   );
 }
 
-function DatasetCard({ ds, onEdit }: { ds: DatasetInfo; onEdit: () => void }) {
+/** `onEdit` null: member (read-only, `paths` withheld by the server, §9). */
+function DatasetCard({ ds, onEdit }: { ds: DatasetInfo; onEdit: (() => void) | null }) {
   const toast = useToast();
   const ref = `@${ds.name}`;
   const isUrl = /^https?:\/\//i.test(ds.source);
@@ -137,6 +138,8 @@ function DatasetCard({ ds, onEdit }: { ds: DatasetInfo; onEdit: () => void }) {
                   </span>
                 </div>
               ))
+            ) : !onEdit ? (
+              <span className="text-faint" title="Réservé aux administrateurs">—</span>
             ) : (
               <span className="text-faint">aucun</span>
             )}
@@ -145,15 +148,17 @@ function DatasetCard({ ds, onEdit }: { ds: DatasetInfo; onEdit: () => void }) {
         <div className="grid grid-cols-[92px_minmax(0,1fr)] gap-3">
           <dt className="text-muted">Utilisé par</dt>
           <dd className="min-w-0">
-            <UsedBy paths={ds.used_by} />
+            <UsedBy paths={ds.used_by} links={!!onEdit} />
           </dd>
         </div>
       </dl>
-      <div className="mt-auto pt-4">
-        <Button size="sm" icon={FileCode} onClick={onEdit}>
-          Modifier le YAML
-        </Button>
-      </div>
+      {onEdit && (
+        <div className="mt-auto pt-4">
+          <Button size="sm" icon={FileCode} onClick={onEdit}>
+            Modifier le YAML
+          </Button>
+        </div>
+      )}
     </Card>
   );
 }
@@ -239,6 +244,7 @@ function NewDatasetDialog({ open, onClose, taken, onCreated }: { open: boolean; 
 
 export default function Datasets() {
   const datasets = useDatasets();
+  const { canWrite } = usePermissions();
   const [search, setSearch] = useState("");
   const [modality, setModality] = useState<ModalityFilter>("all");
   const [editing, setEditing] = useState<string | null>(null);
@@ -259,9 +265,11 @@ export default function Datasets() {
         title="Datasets"
         description="Catalogue des données : chemins par machine, licence et source. Une expérience y fait référence avec « @nom »."
         actions={
-          <Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>
-            Nouveau dataset
-          </Button>
+          canWrite ? (
+            <Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>
+              Nouveau dataset
+            </Button>
+          ) : undefined
         }
       />
 
@@ -302,7 +310,7 @@ export default function Datasets() {
       ) : list.length ? (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
           {list.map((d) => (
-            <DatasetCard key={d.path} ds={d} onEdit={() => setEditing(d.path)} />
+            <DatasetCard key={d.path} ds={d} onEdit={canWrite ? () => setEditing(d.path) : null} />
           ))}
         </div>
       ) : (
@@ -316,14 +324,18 @@ export default function Datasets() {
                 : "Déclarez vos jeux de données (COCO, LibriSpeech…) avec leurs chemins sur chaque machine."
             }
             action={
-              <Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>
-                Nouveau dataset
-              </Button>
+              canWrite ? (
+                <Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>
+                  Nouveau dataset
+                </Button>
+              ) : undefined
             }
           />
         </Card>
       )}
 
+      {canWrite && (
+      <>
       <NewDatasetDialog
         open={creating}
         onClose={() => setCreating(false)}
@@ -337,6 +349,8 @@ export default function Datasets() {
         kind="dataset"
         title={editingInfo ? `Dataset ${editingInfo.name}` : "Dataset"}
       />
+      </>
+      )}
     </Page>
   );
 }

@@ -1,11 +1,13 @@
 import { NotesEditor } from "../../components/NotesEditor";
-import { useSetRunNotes } from "../../lib/queries";
+import { usePermissions, useSetRunNotes } from "../../lib/queries";
 import type { RunDetail } from "../../lib/types";
 
 export function NotesTab({ run }: { run: RunDetail }) {
   const save = useSetRunNotes(run.run_id);
+  const { canWrite } = usePermissions();
   return (
     <NotesEditor
+      readOnly={!canWrite}
       draftKey={`run-notes:${run.run_id}`}
       notes={run.notes}
       save={(notes) => save.mutateAsync(notes)}

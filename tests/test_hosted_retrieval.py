@@ -18,7 +18,7 @@ from helpers_server import (
     RETRIEVAL_KEYS,
     SCW_HOST,
     FakeRunner,
-    add_user_token,
+    add_user_session,
     job_status_of,
     populate,
     wait_for,
@@ -453,13 +453,16 @@ def test_decommission_forced_when_unreachable(client: TestClient, ws: Path, runn
 
 
 def test_decommission_requires_admin(ws: Path, runner: RemoteRunner):
-    member = add_user_token(ws, "marie", "member")
+    member = add_user_session(ws, "marie", "member")
     client = TestClient(create_app(ws, TOKEN, background=False, runner=runner),
                         headers={"X-WMLab-Token": member})
     assert client.post("/api/hosts/scw/decommission", json={"confirm": True}).status_code == 403
     assert client.post("/api/hosts/scw/poweroff").status_code == 403
-    assert client.get("/api/hosts/scw/inventory").status_code == 200
-    assert client.post("/api/hosts/scw/retrieve").status_code == 200
+    # a member is read-only: no inventory (SSH command), no retrieval job
+    assert client.get("/api/hosts/scw/inventory").status_code == 403
+    assert client.post("/api/hosts/scw/retrieve").status_code == 403
+    hosts = client.get("/api/hosts")
+    assert hosts.status_code == 200 and all(h["ssh_target"] is None for h in hosts.json())
 
 
 def test_poweroff_guards(client: TestClient, ws: Path, runner: RemoteRunner,

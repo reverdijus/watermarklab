@@ -5,6 +5,7 @@ import { Heatmap } from "../../components/charts";
 import { useLaunch } from "../../components/launch/LaunchProvider";
 import { formatDuration, formatInt, formatRelative, toDate } from "../../lib/format";
 import { formatMetric, metricLabel } from "../../lib/metrics";
+import { usePermissions } from "../../lib/queries";
 import type { EvalResult, RunDetail } from "../../lib/types";
 
 function robustnessKeys(evals: EvalResult[]): string[] {
@@ -15,6 +16,7 @@ function robustnessKeys(evals: EvalResult[]): string[] {
 
 export function EvalsTab({ run }: { run: RunDetail }) {
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   const benchmarks = useMemo(() => [...new Set(run.evals.map((e) => e.benchmark))].sort(), [run.evals]);
   const [benchmark, setBenchmark] = useState(benchmarks[0] ?? "");
   const current = benchmarks.includes(benchmark) ? benchmark : (benchmarks[0] ?? "");
@@ -47,9 +49,11 @@ export function EvalsTab({ run }: { run: RunDetail }) {
           title="Aucune évaluation"
           description="Évaluez un checkpoint sur un benchmark figé pour mesurer qualité et robustesse attaque par attaque."
           action={
-            <Button variant="primary" icon={Microscope} onClick={evaluate} disabled={!run.checkpoints.length}>
-              Évaluer un checkpoint
-            </Button>
+            canWrite ? (
+              <Button variant="primary" icon={Microscope} onClick={evaluate} disabled={!run.checkpoints.length}>
+                Évaluer un checkpoint
+              </Button>
+            ) : undefined
           }
         />
       </Card>
@@ -118,9 +122,11 @@ export function EvalsTab({ run }: { run: RunDetail }) {
           options={rKeys.map((k) => ({ value: k, label: metricLabel(k) }))}
           className="w-56"
         />
-        <Button icon={Microscope} onClick={evaluate} className="ml-auto">
-          Nouvelle évaluation
-        </Button>
+        {canWrite && (
+          <Button icon={Microscope} onClick={evaluate} className="ml-auto">
+            Nouvelle évaluation
+          </Button>
+        )}
       </div>
 
       <Card>

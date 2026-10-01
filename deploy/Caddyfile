@@ -2,14 +2,53 @@
 # Installé dans /etc/caddy/Caddyfile par deploy/install_server.sh (__DOMAIN__ et __WMLAB_PORT__
 # remplacés). Caddy obtient et renouvelle le certificat Let's Encrypt automatiquement : le DNS
 # du domaine doit pointer vers cette machine et les ports 80/443 être ouverts (groupe de sécurité).
+# Vérifier après modification : caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 __DOMAIN__ {
     encode zstd gzip
+
+    # Corps de requête limité (YAML, notes, réglages, connexion : quelques ko) ; au-delà → 413.
+    request_body {
+        max_size 8MB
+    }
+
     header {
-        Strict-Transport-Security "max-age=31536000"
+        # Appliqués à l'écriture de la réponse : remplacent ceux du backend (pas de doublons).
+        defer
+        # HTTPS obligatoire pour ce domaine et ses sous-domaines (1 an).
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        # Interface servie par le backend : scripts et ressources de la même origine uniquement
+        # (images / médias des runs en data: ou blob:), jamais dans un cadre.
+        # « ? » : seulement si le backend n'en a pas déjà posé une (les fichiers de run sont
+        # servis avec une CSP « sandbox » plus stricte qu'il ne faut pas remplacer).
+        ?Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+        X-Frame-Options "DENY"
         X-Content-Type-Options "nosniff"
         Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
         -Server
     }
-    # Le backend n'écoute que sur 127.0.0.1 : tout passe par ce proxy (jeton exigé par l'API).
+
+    # Journal d'accès (JSON, /var/log/caddy/, rotation). Jamais de secret dedans :
+    # - la chaîne de requête est retirée de l'URL (?token= est accepté sur deux routes de
+    #   téléchargement : GET /api/runs/{id}/file et GET /api/costs.csv) ;
+    # - l'en-tête X-WMLab-Token (jeton de session ou jeton serveur) est supprimé
+    #   (Authorization et Cookie sont déjà masqués par Caddy).
+    log {
+        output file /var/log/caddy/wmlab-access.log {
+            roll_size 50MiB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+        format filter {
+            wrap json
+            fields {
+                request>uri regexp "[?].*$" ""
+                request>headers>X-Wmlab-Token delete
+            }
+        }
+    }
+
+    # Le backend n'écoute que sur 127.0.0.1 : tout passe par ce proxy (session ou jeton exigés
+    # par l'API, sauf /api/health, /api/auth/login et /api/auth/register).
     reverse_proxy 127.0.0.1:__WMLAB_PORT__
 }

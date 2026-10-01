@@ -1,6 +1,9 @@
 # Watermark Lab — backend en mode hébergé (ARCHITECTURE.md §12.7).
-# Installé par deploy/install_server.sh dans /etc/systemd/system/ ; les marqueurs
-# __WMLAB_DIR__ / __WMLAB_USER__ / __WMLAB_PORT__ sont remplacés à l'installation.
+# Installé par deploy/install_server.sh dans /etc/systemd/system/ ; les marqueurs en majuscules
+# encadrés de « __ » (dossier du workspace, utilisateur de service, home RÉEL de cet utilisateur,
+# port) sont remplacés à l'installation.
+# Durcissement ci-dessous : score avec « systemd-analyze security wmlab-server ». Le backend lance
+# git, ssh, rsync, tar et des sous-processus Python (jobs locaux) : ils héritent de ces limites.
 [Unit]
 Description=Watermark Lab — backend (mode hébergé)
 Documentation=file:__WMLAB_DIR__/deploy/README.md
@@ -12,10 +15,13 @@ Type=simple
 User=__WMLAB_USER__
 Group=__WMLAB_USER__
 WorkingDirectory=__WMLAB_DIR__
-# WMLAB_WORKSPACE, WMLAB_TOKEN (jeton serveur, admin implicite), SCW_SECRET_KEY (facultatif).
+# WMLAB_WORKSPACE, WMLAB_DATA (racine des données, épinglée), WMLAB_TOKEN (jeton serveur, admin
+# implicite de secours), SCW_SECRET_KEY (facultatif).
 EnvironmentFile=/etc/wmlab/env
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
+# Caches des sous-processus (torch, huggingface…) : le home est en lecture seule (ProtectSystem).
+Environment=XDG_CACHE_HOME=/var/cache/wmlab
 ExecStart=__WMLAB_DIR__/.venv/bin/python -m wmlab.cli server --port __WMLAB_PORT__ --host 127.0.0.1 --workspace __WMLAB_DIR__
 Restart=always
 RestartSec=3
@@ -23,8 +29,48 @@ RestartSec=3
 # local) survivent à un redémarrage du service et sont rattachés au démarrage suivant.
 KillMode=process
 TimeoutStopSec=30
+
+# ── Durcissement ────────────────────────────────────────────────────────────────────────────
+# Fichiers créés en 0640, dossiers en 0750 : rien de lisible par les autres comptes.
+UMask=0027
 NoNewPrivileges=true
+# /tmp et /var/tmp privés au service.
 PrivateTmp=true
+# Tout le système de fichiers en lecture seule (/home compris)…
+ProtectSystem=strict
+# …sauf le workspace (dépôt, .git, .wmlab : runs, checkpoints, users.yaml, sessions.json,
+# code/<sha>) et ~/.ssh (ssh y écrit known_hosts à la 1re connexion à une machine GPU).
+# Un data_dir ou WMLAB_DATA hors du workspace doit être ajouté ici.
+ReadWritePaths=__WMLAB_DIR__ __WMLAB_HOME__/.ssh
+# ProtectHome=read-only non utilisé : la clé SSH du serveur est sous le home (déjà couvert
+# en lecture seule par ProtectSystem=strict, sauf ~/.ssh ci-dessus).
+# /var/cache/wmlab, créé par systemd pour l'utilisateur de service (XDG_CACHE_HOME ci-dessus).
+CacheDirectory=wmlab
+CacheDirectoryMode=0750
+# /dev minimal (null, zero, urandom, shm…) : pas de GPU ni de matériel sur le serveur central.
+PrivateDevices=true
+# Ni réglages du noyau (/proc/sys), ni modules, ni journal du noyau, ni cgroups, ni horloge,
+# ni nom d'hôte modifiables.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# Sockets locales et IPv4 / IPv6 seulement (HTTP, git, ssh, rsync, API Scaleway).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Pas de création d'espaces de noms (conteneurs), d'ordonnancement temps réel, de fichiers setuid.
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Appels système de l'architecture native, limités à ceux d'un service ordinaire ; un appel hors
+# liste échoue en EPERM au lieu de tuer le processus.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Aucune capacité Linux : le service tourne sous un compte sans privilège.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

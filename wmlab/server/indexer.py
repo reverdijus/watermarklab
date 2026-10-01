@@ -138,7 +138,7 @@ class Indexer:
             for path in sorted(eval_dir.glob("*.json")):
                 result = read_json(path)
                 if isinstance(result, dict):
-                    result.setdefault("run_id", run_dir.name)
+                    result["run_id"] = run_dir.name  # never trust the file: its folder decides
                     evals.append((path.name, result))
         try:
             checkpoints = reader.checkpoints()

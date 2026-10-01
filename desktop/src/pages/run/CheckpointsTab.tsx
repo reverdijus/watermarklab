@@ -4,7 +4,7 @@ import { useLaunch } from "../../components/launch/LaunchProvider";
 import { errorMessage } from "../../lib/api";
 import { formatBytes, formatInt, formatRelative, toDate } from "../../lib/format";
 import { formatMetric, metricLabel, pickKeyMetrics } from "../../lib/metrics";
-import { useFetchCheckpoint } from "../../lib/queries";
+import { useFetchCheckpoint, usePermissions } from "../../lib/queries";
 import type { Checkpoint, RunDetail } from "../../lib/types";
 
 function tagTone(tag: string) {
@@ -17,6 +17,7 @@ function tagTone(tag: string) {
 export function CheckpointsTab({ run }: { run: RunDetail }) {
   const { openLaunch } = useLaunch();
   const fetchCkpt = useFetchCheckpoint(run.run_id);
+  const { canWrite } = usePermissions();
   const toast = useToast();
 
   const onFetch = async (c: Checkpoint) => {
@@ -122,7 +123,9 @@ export function CheckpointsTab({ run }: { run: RunDetail }) {
       cell: (c) => <span className="whitespace-nowrap text-muted">{formatRelative(c.created_at)}</span>,
       sortValue: (c) => toDate(c.created_at)?.getTime(),
     },
-    {
+  ];
+  if (canWrite)
+    columns.push({
       id: "actions",
       header: "",
       align: "right",
@@ -158,8 +161,7 @@ export function CheckpointsTab({ run }: { run: RunDetail }) {
           />
         </div>
       ),
-    },
-  ];
+    });
 
   return (
     <div className="space-y-3">

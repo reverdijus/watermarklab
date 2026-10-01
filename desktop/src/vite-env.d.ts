@@ -3,7 +3,7 @@
 interface ImportMetaEnv {
   /** Backend base URL when the renderer runs in a plain browser through `vite` (dev only). */
   readonly VITE_API_BASE?: string;
-  /** Backend token matching VITE_API_BASE (dev only). */
+  /** Server or session token matching VITE_API_BASE (dev only). */
   readonly VITE_API_TOKEN?: string;
 }
 
@@ -21,7 +21,7 @@ interface WmlabBridge {
   openConnectDialog: () => void;
   /** Switches back to the local backend (menu "Serveur → Utiliser le backend local"). */
   useLocalBackend: () => void;
-  /** Remote mode: forgets the stored token, then opens the connection dialog. */
+  /** Remote mode: revokes the session (`POST /api/auth/logout`, best effort), forgets it, then opens the connection dialog. */
   disconnect: () => void;
 }
 

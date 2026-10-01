@@ -71,7 +71,8 @@ Principes :
     index.sqlite                  # index du serveur (reconstructible)
     hosts.yaml                    # machines (local + ssh)
     hosts_inventory.json          # dernier inventaire par machine (§12.4, cache)
-    users.yaml                    # utilisateurs du mode hébergé (jetons hachés, §12.2 ; mode 0600)
+    users.yaml                    # comptes du mode hébergé (e-mail, rôle, mot de passe haché, §12.2 ; mode 0600)
+    sessions.json                 # sessions de connexion (empreintes SHA-256, expiration, §12.2 ; mode 0600)
     jobs/<job_id>.json            # un fichier par job lancé par l'app
     jobs/launch/<job_id>.json     # launch files (copiés dans env/launch.json du run)
     jobs/logs/<job_id>.log        # sortie des jobs setup / retrieve
@@ -859,9 +860,13 @@ wmlab new hpo PROJECT NAME --experiment EXP
 wmlab runs list [--project P] [--status S] [--include-trials] [--limit 100] [--json]   # runs d'essais HPO exclus sans --include-trials
 wmlab runs show RUN [--json]      # manifest + summary + checkpoints + evals (pour l'analyse) ; RUN = id, fragment unique ou dossier
 wmlab index                       # reconstruit l'index SQLite
-wmlab users add NAME [--role member]   # mode hébergé (§12.2) : crée un utilisateur, affiche son jeton wml_… UNE fois ; --role admin|member
-wmlab users list [--json]              # utilisateurs actifs et révoqués (.wmlab/users.yaml, jamais les jetons)
-wmlab users revoke NAME                # révoque le jeton (l'entrée reste pour l'historique)
+wmlab users add EMAIL --name NAME [--role admin|member] [--password-stdin]   # mode hébergé (§12.2) : compte actif ; mot de passe temporaire affiché UNE fois (sauf --password-stdin)
+wmlab users list [--json]              # comptes (e-mail, nom, rôle, état, dernière connexion ; jamais les hachés)
+wmlab users approve EMAIL [--role R]   # approuve une inscription en attente (rôle member par défaut)
+wmlab users role EMAIL ROLE            # change le rôle (refus : soi-même, dernier admin)
+wmlab users disable EMAIL              # désactive le compte et révoque ses sessions (l'entrée reste pour l'historique)
+wmlab users enable EMAIL               # réactive un compte désactivé
+wmlab users reset-password EMAIL       # mot de passe temporaire affiché UNE fois, sessions révoquées, changement forcé
 wmlab weights list [--json]            # poids officiels déclarés : source, licence, présence locale (§4.6)
 wmlab weights pull NAME... [--force]   # télécharge des poids officiels dans weights_dir()
 ```
@@ -870,20 +875,34 @@ wmlab weights pull NAME... [--force]   # télécharge des poids officiels dans w
 
 ## 9. API HTTP (backend FastAPI, `wmlab.server`)
 
-- Écoute `127.0.0.1` uniquement. Chaque requête `/api/*` exige le jeton, dans l'en-tête
-  `X-WMLab-Token` ou, à défaut, en paramètre `?token=` (accepté sur toutes les routes ; utilisé
-  par le frontend pour les fichiers média). Exception : `GET /api/health` est public (sans
-  jeton ; sert à la sonde de démarrage de l'app) mais ne renvoie `workspace` qu'avec un jeton
-  valide. `OPTIONS` (préflight CORS) est libre. CORS : toutes origines (le token protège) —
-  uniquement quand un jeton est défini. Le serveur a toujours un jeton : `--token`, sinon
-  `WMLAB_TOKEN`, sinon un jeton aléatoire généré et affiché une fois sur stderr ; hors loopback
+- Écoute `127.0.0.1` uniquement. Chaque requête `/api/*` exige un jeton dans l'en-tête
+  `X-WMLab-Token` : le **jeton serveur** (`--token` / `WMLAB_TOKEN` ; admin implicite, utilisé par
+  l'app en mode local) ou un **jeton de session** `wmls_…` obtenu par `POST /api/auth/login`
+  (compte e-mail + mot de passe, §12.2). `?token=` n'est accepté que sur `GET /api/runs/{id}/file`
+  et `GET /api/costs.csv` (fichiers média et export ; jamais ailleurs : un jeton dans une URL finit
+  dans les journaux et l'historique). Routes publiques : `GET /api/health` est public (sonde de
+  démarrage de l'app ; ne renvoie `workspace` qu'avec un jeton valide), ainsi que
+  `POST /api/auth/register` et `POST /api/auth/login`.
+  `OPTIONS` (préflight CORS) est libre. CORS : toutes origines (le jeton protège, jamais de cookie) —
+  uniquement quand un jeton serveur est défini. Le serveur a toujours un jeton serveur : `--token`,
+  sinon `WMLAB_TOKEN`, sinon un jeton aléatoire généré et affiché une fois sur stderr ; hors loopback
   (`--host`), un jeton explicite est obligatoire. Comparaison en bytes (jeton non ASCII ⇒ 401).
+- Rôles (§12.2, appliqués par le middleware, refus par défaut) : `admin` = tout ; `member` =
+  **lecture seule** : `GET` uniquement, moins les routes marquées **admin** ci-dessous (code
+  d'entraînement, registres, journaux, réglages, git, utilisateurs, inventaire des machines) ;
+  seules écritures autorisées à un member : `POST /api/auth/logout` et `POST /api/auth/password`.
+  Toute autre route non-`GET` est **admin**. Les réponses marquées « expurgé pour member »
+  omettent ce qui décrit le code ou l'infrastructure. Refus : 403 `{detail}` en français.
 - `GET /` sert le build du frontend (`desktop/dist`) s'il existe (usage navigateur) ;
   `index.html` est servi en `Cache-Control: no-cache` (un rebuild n'est jamais masqué par le
   cache), les `assets/` hachés en `immutable`.
 - Réponses compressées (gzip) au-delà de 1 ko quand le client l'accepte (`Accept-Encoding`) :
   le détail d'un run (`git_diff`, `spec_yaml`, `events`) atteint plusieurs centaines de ko.
-- Erreurs : statut 4xx/5xx + `{"detail": str}`.
+- Erreurs : statut 4xx/5xx + `{"detail": str}` ; corps JSON invalide ou champ inconnu ⇒ 422 ; corps
+  `/api/*` au-delà de 4 Mo ⇒ 413, corps sans `Content-Length` ⇒ 411. Bornes de lecture :
+  `max_points` ≤ 5 000, `tail` ≤ 20 000, `limit` ≤ 10 000, 20 runs au plus par `GET /api/compare`.
+  Aucune route WebSocket : un scope WebSocket sous `/api/` est fermé (code 1008). Hors loopback,
+  le jeton serveur explicite doit faire au moins 16 caractères.
 - Toutes les réponses sont du JSON en `snake_case`. Types ci-dessous en TypeScript.
 
 ```ts
@@ -1015,8 +1034,20 @@ interface Job {
   retrieval: Retrieval | null;                // §12.4 : sync complète de fin de job (train/hpo/eval sur ssh)
   result: RetrieveResult | null;              // jobs `retrieve` (mis à jour pendant le rapatriement)
 }
-interface Me { name: string; role: "admin" | "member"; hosted: boolean; public_url: string | null }
-interface UserInfo { name: string; role: "admin" | "member"; created_at: string; revoked_at: string | null }
+type UserRole = "admin" | "member";
+type UserStatus = "pending" | "active" | "disabled";
+interface Me {
+  id: string; name: string; email: string; role: UserRole; hosted: boolean; public_url: string | null;
+  must_change_password: boolean;              // mot de passe temporaire : à changer avant d'utiliser l'app
+  auth: "session" | "server_token";           // server_token : jeton serveur (app en mode local, secours admin)
+}
+interface UserInfo {
+  id: string; name: string; email: string; role: UserRole; status: UserStatus; must_change_password: boolean;
+  created_at: string; approved_at: string | null; approved_by: string | null; disabled_at: string | null;
+  last_login_at: string | null;
+}
+interface LoginResult { token: string; user: Me }           // token = jeton de session wmls_… (§12.2)
+interface CreatedUser { user: UserInfo; temporary_password: string }   // affiché une seule fois
 interface GitState {
   available: boolean; hosted: boolean; branch: string | null; sha: string | null; short_sha: string | null;
   dirty: boolean; remote: string | null; ahead: number | null; behind: number | null;
@@ -1043,7 +1074,7 @@ interface Costs {
   items: CostItem[];
   budget: { total_eur: number; start: string | null; end: string | null };
 }
-interface HostedSettings { enabled: boolean; git_branch: string; auto_pull_s: number; auto_commit: boolean; public_url: string | null }
+interface HostedSettings { enabled: boolean; git_branch: string; auto_pull_s: number; auto_commit: boolean; public_url: string | null; allow_registration: boolean }
 interface WorkspaceSettings {
   name: string; budget: { total_eur: number; start: string | null; end: string | null;
     manual_entries: { label: string; eur: number; date: string; project: string | null }[] };
@@ -1060,10 +1091,20 @@ interface Overview {
 
 | Méthode | Route | Réponse |
 |---|---|---|
-| GET | `/api/health` | `{ok: true, version, workspace?}` — **public** (sans jeton ; `workspace` seulement avec jeton) |
-| GET | `/api/me` | `Me` (utilisateur du jeton : `admin` implicite pour le jeton serveur, §12.2) |
-| GET | `/api/users` | `UserInfo[]` (**admin**) |
-| GET | `/api/git` | `GitState` (§12.3) |
+| GET | `/api/health` | `{ok: true, version, hosted: boolean, registration: boolean, workspace?}` — **public** (sans jeton ; `registration` = `hosted.allow_registration` ; `workspace` seulement avec jeton) |
+| POST | `/api/auth/register` body `{email, name, password}` | `{ok: true, status: "pending", message}` (202) — **public** ; 403 si `hosted.allow_registration = false` ; 400 e-mail, nom (`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`, `admin` réservé) ou mot de passe (12 à 256 caractères) invalides ; réponse identique quand l'e-mail ou le nom existe déjà (pas d'énumération) ; 429 limitation (§12.2) |
+| POST | `/api/auth/login` body `{email, password}` | `LoginResult` — **public** ; 401 « E-mail ou mot de passe incorrect. » ; 403 compte `pending` ou `disabled` (après vérification du mot de passe) ; 429 limitation + `Retry-After` |
+| POST | `/api/auth/logout` | `{ok: true}` (révoque la session courante ; `{ok: true}` aussi pour le jeton serveur) — **member** |
+| POST | `/api/auth/password` body `{current_password, new_password}` | `{ok: true}` (change son propre mot de passe, révoque les autres sessions, efface `must_change_password` ; 400 jeton serveur ou politique ; 401 mot de passe courant faux) — **member** |
+| GET | `/api/me` | `Me` (utilisateur de la session ; `admin` implicite pour le jeton serveur, §12.2) |
+| GET | `/api/users` | `UserInfo[]` (**admin** ; `pending`, puis `active`, puis `disabled`, chaque groupe par `name`) |
+| POST | `/api/users` body `{email, name, role}` | `CreatedUser` (**admin** ; compte `active` avec mot de passe temporaire, `must_change_password: true` ; 409 e-mail ou nom déjà utilisés) |
+| POST | `/api/users/{id}/approve` body `{role}` | `UserInfo` (**admin** ; 404 compte inconnu — idem pour toutes les routes `/api/users/{id}/*` ; 409 si le compte n'est pas `pending`) |
+| POST | `/api/users/{id}/role` body `{role}` | `UserInfo` (**admin** ; 400 soi-même ; 409 dernier admin actif) |
+| POST | `/api/users/{id}/disable` | `UserInfo` (**admin** ; sessions révoquées ; 400 soi-même ; 409 dernier admin actif) |
+| POST | `/api/users/{id}/enable` | `UserInfo` (**admin** ; `disabled` → `active` ; 409 pour un compte `pending` : passer par `approve`) |
+| POST | `/api/users/{id}/reset-password` | `CreatedUser` (**admin** ; mot de passe temporaire, sessions révoquées, `must_change_password: true` ; sur son propre compte, la session courante est révoquée aussi) |
+| GET | `/api/git` | `GitState` (§12.3 ; **admin**) |
 | POST | `/api/git/pull` | `GitState` (pull `--ff-only` immédiat ; 400 sans dépôt, 409 arbre sale ou pull impossible) |
 | GET | `/api/overview` | `Overview` |
 | GET | `/api/projects` | `ProjectSummary[]` |
@@ -1071,47 +1112,50 @@ interface Overview {
 | GET | `/api/projects/{name}` | `{summary: ProjectSummary, spec, experiments: ExperimentInfo[], hpo_plans: HpoPlanInfo[], notes: string}` |
 | POST | `/api/projects/{name}/experiments` body `{name, from?: string}` | `{path}` |
 | POST | `/api/projects/{name}/hpo` body `{name, experiment}` | `{path}` |
-| GET | `/api/files?path=` | `{path, content, kind, validation: {valid, errors}}` |
+| GET | `/api/files?path=` | `{path, content, kind, validation: {valid, errors}}` (**admin** : le code et les specs ne sont jamais servis à un member) |
 | PUT | `/api/files` body `{path, content}` | `{saved: true, validation, git: FileGit \| null}` (uniquement sous `projects/`, `benchmarks/`, `datasets/`, `lab/` ; anti path traversal, insensible à la casse ; 409 pour un `benchmarks/<nom>.yaml` existant utilisé par une évaluation enregistrée : nouvelle version seulement ; `git` renseigné en mode hébergé avec `auto_commit` dans un dépôt git, sinon `null`, §12.3) |
 | POST | `/api/validate` body `{content, kind?, path?}` | `{valid, errors, plan: PhasePlanPreview \| null}` |
-| GET | `/api/registry` | `{entries: Record<kind, RegistryEntry[]>, errors: {module, error}[]}` |
-| GET | `/api/runs?project=&experiment=&status=&study=&host=&include_trials=false&limit=500` | `RunSummary[]` (plus récents d'abord) |
-| GET | `/api/runs/{id}` | `RunDetail` |
+| GET | `/api/registry` | `{entries: Record<kind, RegistryEntry[]>, errors: {module, error}[]}` (**admin**) |
+| GET | `/api/runs?project=&experiment=&status=&study=&host=&include_trials=false&limit=500` | `RunSummary[]` (plus récents d'abord ; expurgé pour member : `params = {}`, `error` réduit à sa dernière ligne — idem dans `Overview.running|recent` et `GET /api/compare`) |
+| GET | `/api/runs/{id}` | `RunDetail` (expurgé pour member : `spec = {}`, `spec_yaml = ""`, `spec_path = null`, `overrides = {}`, `params = {}`, `plan = null`, `env = {git: null, git_diff: null, hardware, pip_freeze_lines: 0, command: null, launch: null}`, `error`, `events[].error` et `events[].message` réduits à leur dernière ligne, clé `events[].traceback` supprimée) |
 | GET | `/api/runs/{id}/metrics?keys=a,b&max_points=1000` | `{series: Record<string, Series>, phases: {name, start, end}[]}` (keys vide ⇒ toutes) |
 | GET | `/api/runs/{id}/system?max_points=500` | `{t: number[], series: Record<string, number[]>}` |
-| GET | `/api/runs/{id}/logs?tail=500` | `{lines: string[]}` |
-| GET | `/api/runs/{id}/file?path=&token=` | binaire (confiné au dossier du run) |
+| GET | `/api/runs/{id}/logs?tail=500` | `{lines: string[]}` (**admin** : les journaux contiennent commandes et tracebacks) |
+| GET | `/api/runs/{id}/file?path=&token=` | binaire (confiné au dossier du run ; member : `samples/` seulement, 403 ailleurs ; types média sûrs en ligne, le reste en pièce jointe, §12.7) |
 | PUT | `/api/runs/{id}/notes` body `{notes}` | `{ok: true}` |
 | PUT | `/api/runs/{id}/tags` body `{tags}` | `{ok: true}` |
 | POST | `/api/runs/{id}/stop` | `Job \| {ok: true}` |
 | POST | `/api/runs/{id}/checkpoints/{name}/fetch` | `{ok: true}` (rapatrie un .pt distant) |
 | GET | `/api/compare?runs=a,b&keys=k1,k2&max_points=500` | `{runs: RunSummary[], series: Record<run_id, Record<key, Series>>}` |
 | GET | `/api/studies?project=` | `StudySummary[]` |
-| GET | `/api/studies/{id}` | `StudyDetail` |
+| GET | `/api/studies/{id}` | `StudyDetail` (expurgé pour member : `spec = {}`) |
 | PUT | `/api/studies/{id}/notes` body `{notes}` | `{ok: true}` |
 | GET | `/api/leaderboard?project=&benchmark=&source=benchmark\|val` | `Leaderboard` |
 | GET | `/api/benchmarks` | `BenchmarkInfo[]` |
-| GET | `/api/datasets` | `DatasetInfo[]` |
-| GET/PUT | `/api/hosts` | `Host[]` (PUT reçoit `Host[]`, **admin** ; les champs calculés `unretrieved_*`, `inventory_at`, `active_jobs` sont ignorés à l'écriture) |
+| GET | `/api/datasets` | `DatasetInfo[]` (expurgé pour member : `paths = {}`) |
+| GET/PUT | `/api/hosts` | `Host[]` (GET expurgé pour member : `ssh_target`, `workdir`, `data_dir`, `python`, `scaleway`, `notes` à `null` ; PUT reçoit `Host[]`, **admin** ; les champs calculés `unretrieved_*`, `inventory_at`, `active_jobs` sont ignorés à l'écriture) |
 | POST | `/api/hosts/{name}/test` | `{ok, latency_ms, output, error}` |
 | POST | `/api/hosts/{name}/setup` | `Job` (400 pour une machine retirée) |
-| GET | `/api/hosts/{name}/inventory` | `HostInventory` (recalculé à chaque appel, mis en cache dans `.wmlab/hosts_inventory.json`, §12.4) |
+| GET | `/api/hosts/{name}/inventory` | `HostInventory` (**admin** ; recalculé à chaque appel, mis en cache dans `.wmlab/hosts_inventory.json`, §12.4) |
 | POST | `/api/hosts/{name}/retrieve` | `Job` de `kind: "retrieve"` (400 machine locale ; 409 si un rapatriement de la machine est déjà actif) |
 | POST | `/api/hosts/{name}/decommission` body `{confirm: true, delete_instance?: boolean, force?: boolean}` | `DecommissionResult` (**admin** ; 400 sans `confirm` ou machine locale ; 409 job actif, checkpoints/runs non rapatriés, machine injoignable sans `force`, déjà retirée ; 502 erreur API Scaleway, machine non retirée) |
 | POST | `/api/hosts/{name}/poweroff` | `{ok: true, instance_state}` (**admin** ; 409 job actif ; 400 sans `scaleway` ou sans `SCW_SECRET_KEY` ; 502 erreur API) |
-| GET | `/api/hosts/{name}/instance` | `InstanceInfo` (jamais d'exception) |
-| GET | `/api/jobs?status=` | `Job[]` |
+| GET | `/api/hosts/{name}/instance` | `InstanceInfo` (**admin** ; jamais d'exception) |
+| GET | `/api/jobs?status=` | `Job[]` (expurgé pour member : `overrides = {}`, `error` réduit à sa dernière ligne — idem dans `Overview.jobs`) |
 | POST | `/api/jobs` body `{kind, host, spec_path?, run_id?, checkpoint?, benchmark?, overrides?, max_hours?, smoke?, init_from?: {run, checkpoint, start_phase, resume?}, git_ref?}` | `Job` (`git_ref` : §12.3 ; 400 révision inconnue, machine locale ≠ HEAD, ou machine retirée) |
 | POST | `/api/jobs/estimate` body `{spec_path, host, overrides?}` | `{total_steps, est_hours: number \| null, est_eur: number \| null, basis: string}` |
 | POST | `/api/jobs/{id}/cancel` | `Job` |
 | POST | `/api/jobs/{id}/sync` | `Job` |
 | GET | `/api/costs` | `Costs` |
 | GET | `/api/costs.csv` | CSV (séparateur `;`, en-têtes FR) |
-| GET/PUT | `/api/settings` | `WorkspaceSettings` (PUT : **admin** ; en mode hébergé avec `auto_commit`, `workspace.yaml` est commité et poussé, §12.3) |
+| GET/PUT | `/api/settings` | `WorkspaceSettings` (GET et PUT : **admin** ; en mode hébergé avec `auto_commit`, `workspace.yaml` est commité et poussé, §12.3) |
 
 ### 9.1 Serveur : organisation interne
 - `wmlab/server/app.py` : `create_app(workspace: Path, token: str | None, sync: bool = True) -> FastAPI`
   et `serve(port, token, host, workspace, sync)`.
+- `wmlab/server/catalog.py` : fichiers déclaratifs du workspace ; un lien symbolique (fichier ou
+  dossier de projet, commité dans le dépôt) n'est jamais suivi, un YAML de plus de 1 Mo ou
+  pathologique (imbrication profonde) est ignoré comme invalide.
 - `wmlab/server/db.py` : SQLite (stdlib `sqlite3`, WAL). Tables `runs`, `studies`, `evals`,
   `checkpoints` (index reconstructible depuis les fichiers).
 - `wmlab/server/indexer.py` : scan incrémental (mtime) de `runs/` et `studies/`, thread
@@ -1120,14 +1164,19 @@ interface Overview {
   annulation, rattachement au redémarrage (les jobs survivent à la fermeture de l'app).
 - `wmlab/server/executors/{base,local,ssh}.py` :
   - `local` : `subprocess.Popen([...python, "-m", "wmlab.cli", ...], start_new_session=True)`,
-    env `WMLAB_WORKSPACE/WMLAB_DATA/WMLAB_HOST/WMLAB_PRICE_EUR_PER_HOUR`, sortie vers
+    env `WMLAB_WORKSPACE/WMLAB_DATA/WMLAB_HOST/WMLAB_PRICE_EUR_PER_HOUR` (jamais `WMLAB_TOKEN`
+    ni `SCW_SECRET_KEY` : le process d'entraînement importe les plugins), sortie vers
     `<data>/runs/<run_id>/stdout.log` (ou `studies/…`).
   - `ssh` : `ssh -o BatchMode=yes -o ConnectTimeout=10 <target>` (utilise ~/.ssh/config, clés
     de l'utilisateur ; aucun secret stocké), `rsync -az --delete` du code (exclusions : `.git`,
     `.venv`, `.wmlab`, `desktop`, `node_modules`, `__pycache__`), écriture du launch file,
     lancement détaché `nohup setsid … & echo $!`, annulation `kill -TERM -<pgid>`,
-    sync descendante `rsync -az --exclude 'checkpoints/*.pt'` des dossiers de runs/études vers
-    `.wmlab/runs|studies/`. Tous les arguments passent par `shlex.quote` (y compris la partie
+    sync descendante `rsync -az --safe-links --exclude 'checkpoints/*.pt'` des dossiers de
+    runs/études vers `.wmlab/runs|studies/` (`--safe-links` : un lien symbolique créé sur la
+    machine GPU vers l'extérieur du dossier — `/etc/wmlab/env`, clé SSH — n'est jamais recréé
+    sur le serveur) ; tout identifiant venant de la machine (inventaire, `trials.jsonl`,
+    noms de checkpoints) doit respecter `SAFE_ID` (`[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`, sans
+    `..`) avant de servir de composant de chemin, sinon il est ignoré (journal) ou refusé. Tous les arguments passent par `shlex.quote` (y compris la partie
     chemin des spécifications rsync `cible:'chemin'`, interprétée par le shell distant) ;
     `ssh … -- <cible> <commande>` ; `ssh_target` est validé (`[utilisateur@]hôte`, sans
     option ni espace) ainsi que `workdir`/`data_dir`/`python` (ni `-` initial ni caractère de
@@ -1136,7 +1185,9 @@ interface Overview {
 - `wmlab/server/costs.py` : agrégation (runs hors essais + études + évals + entrées manuelles).
 - `wmlab/server/gitops.py` (`GitRepo`, `GitSync`), `wmlab/server/inventory.py` (inventaire,
   vérification des tailles, cache), `wmlab/server/hostops.py` (retrait / extinction / état
-  d'instance), `wmlab/server/scaleway.py` (client HTTP) et `wmlab/users.py` : mode hébergé (§12).
+  d'instance), `wmlab/server/scaleway.py` (client HTTP), `wmlab/users.py` (comptes, mots de
+  passe, sessions) et `wmlab/server/auth.py` (routes `/api/auth/*`, `/api/users*`, limitation de
+  débit, journal d'audit) : mode hébergé (§12).
 - Le launch file (`env/launch.json`) contient `git` (sha, branch, dirty, remote) + `git_diff`
   capturés **sur le Mac** au lancement (le serveur distant n'a pas `.git`), plus `user`,
   `git_ref`, `git_sha` (§12.2–12.3 ; pour un lancement par révision, `git` décrit le commit
@@ -1159,8 +1210,9 @@ interface Overview {
   `apiBase`/`token` par un IPC synchrone `wmlab:session` réservé à la fenêtre principale), tue
   le backend à la fermeture (les jobs d'entraînement, eux, continuent). Fenêtre
   `titleBarStyle: "hiddenInset"`.
-- Hors Electron (navigateur servi par FastAPI) : `apiBase = window.location.origin`, token lu
-  depuis `?token=` puis `sessionStorage`.
+- Hors Electron (navigateur servi par FastAPI) : `apiBase = window.location.origin`, jeton de
+  session lu dans `localStorage` (`wmlab.token`) après connexion par e-mail + mot de passe
+  (`LoginGate`, §12.6) ; `?token=` n'est plus lu depuis l'URL.
 - Scripts npm : `dev` (vite + electron), `build` (tsc + vite build), `start` (electron sur le build),
   `dist` (build + electron-builder mac `dir`, produit `release/mac-arm64/Watermark Lab.app`).
 - Design « à la Claude » : épuré, fond chaud, sidebar à gauche, titres en serif système
@@ -1199,6 +1251,11 @@ estimation € → lancer).
   `wmlab plugin-test`, `wmlab train --smoke`).
 - `wmlab-analyse` : analyser runs et études (`wmlab runs show --json`, fichiers de run),
   rédiger les conclusions dans `notes.md`, proposer les prochains plans en tenant compte du budget.
+- `check` : toutes les vérifications du dépôt (`wmlab validate`, `pytest`, build + tests du
+  desktop, `deploy/tests_dry_run.sh`) via l'agent `wmlab-check` ; rapport des échecs.
+- Agents typés (`.claude/agents/` : `wmlab-check`, `wmlab-explore`, `desktop-build`,
+  `wmlab-review`), hooks de garde et de validation (`.claude/hooks/`), règles par dossier
+  (`.claude/rules/`) et `.claude/settings.json` : voir `CLAUDE.md` § Outillage Claude.
 
 ---
 
@@ -1227,33 +1284,118 @@ hosted:
   auto_pull_s: 60       # 0 = désactivé
   auto_commit: true     # PUT /api/files → commit + push (sinon écriture locale seule)
   public_url: null      # ex. "https://lab.example.com", affiché dans l'UI
+  allow_registration: true   # POST /api/auth/register ouvert (comptes créés en attente d'approbation)
 ```
 `WorkspaceSettings.hosted: HostedSettings` (défauts ci-dessus). Les postes des membres gardent
-`enabled: false` (mode local inchangé).
+`enabled: false` (mode local inchangé). Un `workspace.yaml` présent mais invalide ne ramène pas
+le serveur aux valeurs par défaut : les derniers réglages lus avec succès sont conservés (journal
+`error`), pour ne jamais désactiver le mode hébergé ni rouvrir l'inscription par accident.
 
-### 12.2 Utilisateurs et jetons (`.wmlab/users.yaml`)
+### 12.2 Comptes, mots de passe et sessions (`.wmlab/users.yaml`, `.wmlab/sessions.json`)
 ```yaml
 users:
-  - {name: justin, role: admin, token_sha256: "<hex>", created_at: "…Z", revoked_at: null}
+  - id: u_1f3c9a0b7d2e              # identifiant stable (u_ + 12 hex)
+    name: justin                    # identifiant d'équipe unique (attribution des runs, auteur git)
+    email: justin@example.com       # identifiant de connexion, unique, stocké en minuscules
+    role: admin                     # admin | member
+    status: active                  # pending | active | disabled
+    password_hash: "scrypt$15$8$1$<sel b64>$<hash b64>"   # null : mot de passe non défini
+    must_change_password: false     # true après un mot de passe temporaire (CLI, réinitialisation)
+    created_at: "…Z"
+    approved_at: "…Z"               # null tant que pending
+    approved_by: cli                # name de l'admin, ou "cli"
+    disabled_at: null
+    last_login_at: "…Z"
 ```
-- Jeton : `wml_<40 hex>` (`secrets.token_hex(20)`), affiché **une seule fois** par
-  `wmlab users add NAME [--role admin|member]` ; seul son SHA-256 est stocké.
-  `wmlab users list`, `wmlab users revoke NAME`. Module : `wmlab.users`
-  (`load_users`, `add_user`, `revoke_user`, `resolve_token(token) -> User | None`).
-- Authentification (`TokenMiddleware`) : un jeton est valide s'il égale le jeton serveur
-  (`--token` / `WMLAB_TOKEN`, utilisateur implicite `{name: "admin", role: "admin"}`) ou s'il
-  correspond à un utilisateur non révoqué. `scope["wmlab_user"] = {"name", "role"}`.
-- Rôles : `member` = tout sauf `PUT /api/hosts`, `PUT /api/settings`, décommission/extinction de
-  machines et gestion des utilisateurs (`admin`). Refus : 403 `{detail}` en français.
-- Attribution : `Job.user`, `run.json.user`, `study.json.user` (string | null) — écrits via le
-  launch file (`launch.json.user`) et `Run.create(launch_info=…)` ; `RunSummary.user`,
-  `StudySummary.user`, `Job.user` exposés par l'API.
-- Routes : `GET /api/me` → `{name: string, role: "admin"|"member", hosted: boolean,
-  public_url: string|null}` ; `GET /api/users` (admin) → `[{name, role, created_at, revoked_at}]`.
+- **Deux rôles.** `admin` : tout (éditer, lancer, suivre, gérer machines, budget et comptes).
+  `member` : **lecture seule** (suivi des runs, études, classement, budget, machines) **sans
+  accès au code d'entraînement ni aux architectures** : ni `lab/`, ni `wmlab/`, ni specs YAML,
+  ni registres, ni journaux, ni réglages (politique §9 : `GET` seulement, routes **admin**
+  exclues, réponses expurgées). Lancer une expérience depuis l'app demande donc un compte
+  `admin` ; le flux d'équipe (éditer localement → pousser → lancer par révision) est celui des
+  admins.
+- **Inscription** (`POST /api/auth/register`, publique si `hosted.allow_registration`) : crée un
+  compte `pending`, rôle `member`, sans aucun accès (login ⇒ 403 « compte en attente »). Un
+  admin l'approuve en choisissant le rôle (app : Réglages → Utilisateurs ; `wmlab users approve`).
+  Un admin peut aussi créer directement un compte actif (`POST /api/users`, `wmlab users add`) :
+  un **mot de passe temporaire** est affiché **une seule fois** ; `must_change_password: true`
+  oblige à le changer à la première connexion (l'app n'affiche rien d'autre tant que ce n'est
+  pas fait). Le premier admin est créé à l'installation (`deploy/install_server.sh --admin NAME
+  --admin-email EMAIL`, §12.7).
+- **Mot de passe** : 12 à 256 caractères, aucune autre règle (longueur plutôt que complexité) ;
+  refusé s'il est égal à l'e-mail ou au nom. Haché **scrypt** (`hashlib.scrypt`, n = 2¹⁵, r = 8,
+  p = 1, sel 16 octets, 32 octets de sortie, `maxmem = 2²⁶`), stocké `scrypt$15$8$1$<sel>$<hash>`
+  (base64 sans padding ; le préfixe permet de changer d'algorithme plus tard). Vérification en
+  temps constant (`hmac.compare_digest`) ; un e-mail inconnu subit quand même un hachage factice
+  (pas d'énumération par le temps de réponse).
+- **Session** : `POST /api/auth/login {email, password}` → jeton `wmls_<48 hex>` (24 octets
+  `secrets.token_bytes`) ; l'ouverture relit le compte sous verrou et refuse (401) si son état ou
+  son mot de passe a changé depuis la vérification (une réinitialisation ou une désactivation
+  concurrente ne laisse jamais une session survivante) ; seul son SHA-256 est stocké dans `<data>/sessions.json`
+  (`{sessions: [{id, user_id, token_sha256, created_at, expires_at, last_seen_at, ip}]}`, mode
+  0600). Durée 30 jours (`SESSION_TTL_S`), `last_seen_at` rafraîchi au plus toutes les 5 min ;
+  les sessions expirées sont purgées à chaque écriture. Révocation : `POST /api/auth/logout`
+  (session courante), changement de mot de passe (toutes les autres sessions du compte),
+  désactivation ou réinitialisation par un admin (toutes). Le rôle et l'état sont relus dans
+  `users.yaml` à chaque requête (une rétrogradation ou une désactivation est immédiate).
+- **Authentification** (`TokenMiddleware`) : en-tête `X-WMLab-Token` = jeton serveur (`--token` /
+  `WMLAB_TOKEN` ; utilisateur implicite `{id: "", name: "admin", email: "", role: "admin"}`,
+  `auth: "server_token"` ; usages : app en mode local, secours admin en ligne de commande) ou jeton
+  de session d'un compte `active`. `scope["wmlab_user"] = {"id", "name", "email", "role",
+  "auth", "session_id"}`. Sans jeton serveur configuré (`token=None` : tests, intégration), admin
+  implicite. `?token=` : seulement `GET /api/runs/{id}/file` et `GET /api/costs.csv`.
+- **Limitation de débit** (mémoire du process, fenêtre glissante, réservation atomique de la
+  tentative avant la vérification du mot de passe, `wmlab/server/auth.py`) : `login` 10 tentatives
+  par couple (e-mail, IP) et 30 par IP sur 15 min, 100 par e-mail par heure toutes IP confondues
+  (force brute distribuée sans permettre de verrouiller un compte depuis une seule IP) ; `register`
+  5 par IP par heure ; `POST /api/auth/password` 5 échecs par compte sur 15 min → 429 `{detail}` +
+  `Retry-After` (exposé en CORS). IP = `request.client.host` (uvicorn applique `X-Forwarded-For`
+  venant du proxy local, `forwarded_allow_ips` par défaut = 127.0.0.1) ; clé IPv6 = /64. Un e-mail
+  de connexion mal formé ⇒ 401 sans journalisation de la valeur. Au plus `SCRYPT_SLOTS = 4` scrypt
+  en parallèle ; au-delà de 5 s d'attente ⇒ 503 « serveur occupé ».
+- **Journal d'audit** (`.wmlab/logs/server.log`, logger `wmlab.server`, lignes préfixées
+  `audit:`) : connexions réussies et échouées (e-mail, IP), inscriptions, créations, approbations,
+  changements de rôle, désactivations / réactivations, réinitialisations, changements de mot de
+  passe, déconnexions, refus 403. Jamais de mot de passe ni de jeton.
+- **Garde-fous** : un admin ne peut ni se rétrograder ni se désactiver lui-même (400) ; le
+  dernier admin actif ne peut être ni rétrogradé ni désactivé (409) ; le nom `admin` reste
+  réservé au jeton serveur.
+- **Attribution** : inchangée — `Job.user`, `run.json.user`, `study.json.user` = `name` du
+  compte (string | null), auteur git `<name> <<name>@wmlab.local>` (jamais l'e-mail dans le dépôt).
+- **Module `wmlab.users`** : `User`, `Session`, `UserStore(data_root)` (écritures atomiques
+  avec fsync, mode 0600, verrou du process + verrou inter-process `fcntl` sur `<data>/.users.lock`
+  pour chaque lecture-modification-écriture — la CLI et le serveur peuvent tourner en même temps —,
+  relecture quand un fichier change (mtime, taille, inode) ; les hachages scrypt se calculent hors
+  verrou) avec `register(email, name, password)`, `add(email, name, role, password=None, by="cli")
+  -> (User, temporary_password | None)`, `approve(id, role, by)`, `set_role(id, role, actor)`,
+  `disable(id, actor)`, `enable(id, actor)`, `reset_password(id, actor) -> (User,
+  temporary_password)` (`actor` = identité `{id, name, …}` de l'appelant, `CLI_ACTOR` en ligne de
+  commande), `change_password(id, current, new, keep_session=None)` (409 si le hachage a changé
+  entre-temps), `authenticate(email, password) -> User` (lève `UserError(401|403)`),
+  `open_session(user, ip) -> (Session, token)`, `resolve_session(token) -> (User, Session) | None`
+  (un échec d'écriture du `last_seen_at` est journalisé, jamais bloquant), `revoke_session(id)`,
+  `revoke_user_sessions(user_id, keep=None)`, `by_email`, `by_id`, `by_name`, `users()`,
+  `legacy_entries()`, `broken()` ; fonctions `hash_password`, `verify_password`,
+  `check_password_policy`, `check_email`, `check_name`, `temporary_password()` (16 caractères
+  `secrets`), `normalize_email`. E-mails, identifiants et mots de passe doivent être encodables en
+  UTF-8 et sans caractère de contrôle (400 sinon). Erreurs : `UserError(message, status)` en
+  français ; `UsersFileError` (503) quand `users.yaml` existe mais est illisible : les lectures ne
+  voient aucun compte (personne ne se connecte, le jeton serveur reste utilisable), **aucune
+  écriture n'a lieu** (le fichier n'est jamais remplacé), `wmlab users list` affiche l'erreur.
+- **Routes** (§9) : `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`,
+  `POST /api/auth/password`, `GET /api/me`, `GET /api/users`, `POST /api/users`,
+  `POST /api/users/{id}/approve|role|disable|enable|reset-password` (module `wmlab/server/auth.py`).
+- **CLI** (sur le serveur, §8.4) : `wmlab users add EMAIL --name NAME [--role admin|member]
+  [--password-stdin]`, `users list [--json]`, `users approve EMAIL [--role R]`, `users role EMAIL
+  ROLE`, `users disable EMAIL`, `users enable EMAIL`, `users reset-password EMAIL`.
+- **Ancien format** (entrées `{name, token_sha256}` sans `email`, jetons `wml_`) : plus reconnu.
+  `wmlab users list` signale ces entrées (« ancien format : recréer le compte ») ; rien d'autre
+  ne les lit, et elles sont conservées telles quelles quand le fichier est réécrit.
 
 ### 12.3 Git : révision lancée et édition depuis l'app
 - `GET /api/git` → `GitState = {available: boolean, hosted: boolean, branch: string|null,
-  sha: string|null, short_sha: string|null, dirty: boolean, remote: string|null,
+  sha: string|null, short_sha: string|null, dirty: boolean, remote: string|null` (URL sans
+  identifiants : `https://user:token@hôte` est renvoyé `https://hôte`)`,
   ahead: number|null, behind: number|null, last_pull_at: string|null, last_pull_error: string|null}`.
   `POST /api/git/pull` → `GitState` (pull `--ff-only` immédiat de la branche courante ; 400 sans
   dépôt git, 409 si arbre sale ou pull impossible, `{detail}` en français).
@@ -1359,15 +1501,32 @@ users:
 - Erreurs API → `JobError(502, message en français)`.
 
 ### 12.6 Desktop et navigateur en mode équipe
-- **Écran de connexion** (`LoginGate`) : affiché quand aucun jeton n'est connu ou que
-  `GET /api/me` renvoie 401 : champ jeton (et URL du serveur en navigateur si l'origine n'est pas
-  le backend) ; jeton mémorisé dans `localStorage` (`wmlab.token`, try/catch) en navigateur ;
-  bouton « Se déconnecter » dans le pied de la sidebar, qui affiche le nom de l'utilisateur.
-- **Electron, mode distant** : `config.json` (userData) `{mode: "remote", apiBase, token}` ;
-  jeton chiffré via `safeStorage` quand disponible ; menu « Serveur » : « Se connecter à un serveur
-  distant… » (dialogue URL + jeton, validation `/api/health` + `/api/me`), « Utiliser le backend
-  local ». En mode distant, aucun backend n'est lancé ; `window.wmlab = {apiBase, token,
-  platform, mode}`.
+- **Écran de connexion** (`LoginGate`) : affiché quand aucune session n'est connue ou que
+  `GET /api/me` renvoie 401 : e-mail + mot de passe (et URL du serveur en navigateur si l'origine
+  n'est pas le backend) → `POST /api/auth/login` ; lien « Créer un compte » → formulaire
+  (identifiant, e-mail, mot de passe, confirmation) → `POST /api/auth/register` → message
+  « Demande enregistrée : un administrateur doit approuver votre compte » (lien caché si
+  `GET /api/health` indique `registration: false`). Jeton de session mémorisé dans `localStorage`
+  (`wmlab.token`, try/catch) en navigateur ; « Se déconnecter » (pied de la sidebar, Réglages →
+  Connexion) appelle `POST /api/auth/logout` puis oublie le jeton. Si `Me.must_change_password`,
+  l'app n'affiche qu'un écran « Définir un nouveau mot de passe » (`POST /api/auth/password`)
+  jusqu'au changement.
+- **Electron, mode distant** : `config.json` (userData) `{mode: "remote", apiBase, token}` (jeton
+  de session, chiffré via `safeStorage` quand disponible) ; menu « Serveur » : « Se connecter à
+  un serveur distant… » (dialogue URL + e-mail + mot de passe ; le main process appelle
+  `/api/health` puis `POST /api/auth/login` et ne stocke que le jeton de session, jamais le mot de
+  passe), « Utiliser le backend local ». « Se déconnecter » appelle `POST /api/auth/logout`
+  (meilleur effort) puis oublie le jeton. En mode distant, aucun backend n'est lancé ;
+  `window.wmlab = {apiBase, token, platform, mode}`.
+- **Permissions dans l'interface** (`usePermissions()` : `{role, isAdmin, canWrite, canViewCode}`,
+  dérivé de `GET /api/me` ; mode local Electron = admin) : pour un `member`, l'interface est en
+  lecture seule — pas de bouton « Nouveau lancement », de création de projet / expérience / plan,
+  d'éditeur YAML (les expériences et plans sont listés avec leurs métadonnées seulement), de
+  modification des notes et des tags, d'arrêt / annulation / rapatriement, d'actions sur les
+  machines ; pages Bibliothèque et onglet Journaux absents ; ni paramètres (`params` vides) ni
+  timeline des phases (`plan` null) ; Réglages réduit à « Mon compte » (nom, e-mail, rôle,
+  changement de mot de passe), « Connexion » et « Apparence » (préférence locale). Un 403
+  inattendu est affiché en toast « Action réservée aux administrateurs ».
 - **Auteur** : colonne/label « par <user> » dans les listes de runs, d'études et de jobs ;
   filtre « mes runs ».
 - **Dialogue de lancement** : champ « Révision git » pré-rempli depuis `GET /api/git`
@@ -1381,18 +1540,55 @@ users:
   qu'il reste des checkpoints non rapatriés ou des jobs actifs ; dialogue de confirmation qui
   récapitule runs/checkpoints vérifiés et propose « supprimer aussi l'instance Scaleway » quand
   c'est configuré). Badge d'avertissement sur la carte tant que `unretrieved_checkpoints > 0`.
-- **Réglages** : section « Mode hébergé » (branche, dernier pull, bouton « Tirer maintenant »,
-  URL publique), section « Utilisateurs » (admin : liste + rappel `wmlab users add`).
+- **Réglages** : section « Mon compte » (tous : nom, e-mail, rôle, formulaire de changement de
+  mot de passe), section « Mode hébergé » (admin : branche, dernier pull, bouton « Tirer
+  maintenant », URL publique, inscription ouverte ou fermée), section « Utilisateurs » (admin :
+  tableau e-mail / nom / rôle / état / dernière connexion ; actions « Approuver » (choix du rôle),
+  « Changer le rôle », « Désactiver » / « Réactiver », « Réinitialiser le mot de passe » et bouton
+  « Créer un compte » — le mot de passe temporaire est montré une seule fois dans un dialogue ;
+  badge « en attente » dans la sidebar tant qu'une inscription attend un admin).
 
 ### 12.7 Déploiement (`deploy/`)
 - `deploy/install_server.sh` (Ubuntu 24.04, idempotent) : paquets (git, rsync, curl), uv,
   Node 22 (NodeSource), clone du dépôt (`--repo URL --branch main --dir /opt/wmlab`),
   `uv sync --extra server --extra train` (+ `--extra cpu` si l'extra CPU-only de torch est défini
   dans `pyproject.toml` via les sources uv conditionnelles), `npm ci && npm run build` dans
-  `desktop/`, `wmlab users add <nom> --role admin` (jeton affiché ; le nom `admin` est réservé à
-  l'utilisateur implicite du jeton serveur), service systemd
-  `deploy/wmlab-server.service` (`EnvironmentFile=/etc/wmlab/env` : `WMLAB_WORKSPACE`,
-  `WMLAB_TOKEN`, `SCW_SECRET_KEY` optionnel), reverse proxy `deploy/Caddyfile` (HTTPS
-  automatique → `127.0.0.1:8765`), `deploy/backup.sh` (archive quotidienne de `.wmlab` vers un
-  bucket Object Storage via `rclone` si présent, sinon `tar` local), `deploy/README.md`
-  (DNS, clé SSH du serveur à déposer sur les machines GPU, jeton par membre, connexion de l'app).
+  `desktop/`, premier compte admin `wmlab users add <email> --name <nom> --role admin`
+  (`--admin NAME --admin-email EMAIL` ; mot de passe temporaire affiché une seule fois, à changer
+  à la première connexion ; le nom `admin` est réservé à l'utilisateur implicite du jeton
+  serveur), service systemd `deploy/wmlab-server.service` (`EnvironmentFile=/etc/wmlab/env` :
+  `WMLAB_WORKSPACE`, `WMLAB_DATA=<dir>/.wmlab` (racine des données épinglée par
+  l'environnement : `workspace.yaml:data_dir`, fichier versionné tiré de git, ne peut pas
+  déplacer `users.yaml`), `WMLAB_TOKEN`, `SCW_SECRET_KEY` optionnel ; durcissement :
+  `ProtectSystem=strict` + `ReadWritePaths=<dir> <home>/.ssh`, `ProtectHome=read-only` non utilisé
+  car la clé SSH est sous `<home>`, `NoNewPrivileges`, `PrivateTmp`, `PrivateDevices`,
+  `ProtectKernel*`, `ProtectControlGroups`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`,
+  `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`,
+  `SystemCallArchitectures=native`, `SystemCallFilter=@system-service` avec
+  `SystemCallErrorNumber=EPERM`, `CapabilityBoundingSet=`, `UMask=0027`, `CacheDirectory=wmlab`
+  + `XDG_CACHE_HOME=/var/cache/wmlab` pour les caches torch / poids des jobs locaux ; marqueurs
+  `__WMLAB_DIR__`, `__WMLAB_USER__`, `__WMLAB_HOME__` (home réel du compte de service),
+  `__WMLAB_PORT__` remplacés à l'installation ; `.wmlab/` en 0750), reverse proxy
+  `deploy/Caddyfile` (HTTPS automatique → `127.0.0.1:8765` ;
+  en-têtes `Strict-Transport-Security` avec `includeSubDomains`, `Content-Security-Policy`
+  (`default-src 'self'`, `img-src 'self' data: blob:`, `media-src 'self' blob:`, `style-src 'self'
+  'unsafe-inline'`, `frame-ancestors 'none'`, `base-uri 'self'`, `form-action 'self'`, `object-src
+  'none'`), `X-Frame-Options DENY`, `X-Content-Type-Options nosniff`, `Referrer-Policy
+  no-referrer`, `Permissions-Policy` minimal, en-têtes en `defer` pour remplacer ceux du
+  backend ; `request_body max_size 8MB` ; journal d'accès JSON filtré : chaîne de requête
+  retirée de l'URI et en-tête `X-WMLab-Token` supprimé — Caddy ne masque par défaut
+  qu'`Authorization` et `Cookie`), `deploy/patch_workspace.py` (bloc `hosted:` dont
+  `allow_registration`, option `--allow-registration true|false`), `deploy/backup.sh` (archive quotidienne de `.wmlab` vers un bucket Object
+  Storage via `rclone` si présent, sinon `tar` local), `deploy/README.md` (DNS, clé SSH du serveur
+  à déposer sur les machines GPU, comptes et approbation, connexion de l'app).
+- Les mêmes en-têtes de sécurité (hors HSTS) sont ajoutés par le backend aux pages de
+  `desktop/dist` (`_DesktopFiles`, `SPA_SECURITY_HEADERS`) : l'interface reste protégée en
+  accès par tunnel SSH. Autres protections du backend (`wmlab/server/auth.py`) :
+  `BodyLimitMiddleware` (corps `/api/*` > 4 Mo ⇒ 413, corps sans `Content-Length` ⇒ 411) ;
+  `GET /api/runs/{id}/file` ne sert en ligne que les types média sûrs (`INLINE_MEDIA_TYPES` :
+  images, audio, vidéo, JSON, texte) avec `X-Content-Type-Options: nosniff` et
+  `Content-Security-Policy: default-src 'none'; sandbox`, tout autre fichier (HTML, SVG, `.pt`…)
+  part en pièce jointe `application/octet-stream` ; un member n'y lit que `samples/` (jamais les
+  checkpoints, `spec.yaml` ni les journaux) ; en mode hébergé, les réponses 404 (fichier) et
+  500 ne contiennent ni chemin du serveur ni texte d'exception (référence vers `server.log`) ;
+  uvicorn sans en-tête `Server`.

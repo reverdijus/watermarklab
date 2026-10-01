@@ -610,13 +610,14 @@ class BudgetSettings(StrictModel):
 
 
 class HostedSettings(StrictModel):
-    """Hosted mode (§12.1): central server following a git branch, team tokens."""
+    """Hosted mode (§12.1): central server following a git branch, team accounts."""
 
     enabled: bool = False
     git_branch: str = Field("main", min_length=1)
     auto_pull_s: int = Field(60, ge=0)
     auto_commit: bool = True
     public_url: str | None = None
+    allow_registration: bool = True  # POST /api/auth/register (accounts wait for approval)
 
     @field_validator("git_branch")
     @classmethod

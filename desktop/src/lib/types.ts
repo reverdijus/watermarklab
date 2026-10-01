@@ -398,6 +398,8 @@ export interface HostedSettings {
   auto_pull_s: number;
   auto_commit: boolean;
   public_url: string | null;
+  /** `POST /api/auth/register` open (accounts created pending approval). */
+  allow_registration: boolean;
 }
 
 export interface Overview {
@@ -417,9 +419,14 @@ export interface Overview {
 export type JobKind = Job["kind"];
 export type SpecKind = "project" | "experiment" | "hpo" | "benchmark" | "dataset" | "workspace" | "hosts";
 
+/** `GET /api/health` — public route. */
 export interface Health {
   ok: true;
   version: string;
+  /** Hosted mode (central server). */
+  hosted: boolean;
+  /** Self-registration open (`hosted.allow_registration`). */
+  registration: boolean;
   workspace?: string; // only when the request carried a valid token
 }
 
@@ -589,21 +596,76 @@ export interface JobEstimate {
 // ---------------------------------------------------------------------------
 
 export type UserRole = "admin" | "member";
+export type UserStatus = "pending" | "active" | "disabled";
 
 /** `GET /api/me`. */
 export interface Me {
+  id: string;
   name: string;
+  email: string;
   role: UserRole;
   hosted: boolean;
   public_url: string | null;
+  /** Temporary password: must be changed before using the app. */
+  must_change_password: boolean;
+  /** `server_token`: server token (app in local mode, admin fallback). */
+  auth: "session" | "server_token";
 }
 
 /** `GET /api/users` (admin). */
 export interface UserInfo {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  status: UserStatus;
+  must_change_password: boolean;
+  created_at: string;
+  approved_at: string | null;
+  approved_by: string | null;
+  disabled_at: string | null;
+  last_login_at: string | null;
+}
+
+/** `POST /api/auth/login` — `token` is a session token `wmls_…`. */
+export interface LoginResult {
+  token: string;
+  user: Me;
+}
+
+/** `POST /api/users`, `POST /api/users/{id}/reset-password` — the password is shown once. */
+export interface CreatedUser {
+  user: UserInfo;
+  temporary_password: string;
+}
+
+export interface LoginBody {
+  email: string;
+  password: string;
+}
+
+export interface RegisterBody {
+  email: string;
+  name: string;
+  password: string;
+}
+
+/** `POST /api/auth/register` (202). */
+export interface RegisterResult {
+  ok: true;
+  status: "pending";
+  message: string;
+}
+
+export interface ChangePasswordBody {
+  current_password: string;
+  new_password: string;
+}
+
+export interface CreateUserBody {
+  email: string;
   name: string;
   role: UserRole;
-  created_at: string;
-  revoked_at: string | null;
 }
 
 /** `GET /api/git`, `POST /api/git/pull`. */

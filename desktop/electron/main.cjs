@@ -10,10 +10,13 @@
  * 4. stops the backend when the app quits (training jobs are independent
  *    processes and keep running).
  *
- * Remote mode (§12.6, menu "Serveur → Se connecter à un serveur distant…"): config.json
- * holds `{mode: "remote", apiBase, tokenEncrypted | token}` (token encrypted with
- * `safeStorage` when available); no Python backend is started, the renderer talks to the
- * central server. "Serveur → Utiliser le backend local" switches back.
+ * Remote mode (§12.6, menu "Serveur → Se connecter à un serveur distant…"): the dialog asks
+ * for the server URL, an e-mail and a password; the main process calls `POST /api/auth/login`
+ * and keeps ONLY the session token (`wmls_…`, never the password) in config.json
+ * `{mode: "remote", apiBase, tokenEncrypted | token}` (encrypted with `safeStorage` when
+ * available); no Python backend is started, the renderer talks to the central server.
+ * "Se déconnecter" revokes the session (`POST /api/auth/logout`, best effort) before
+ * forgetting it. "Serveur → Utiliser le backend local" switches back.
  *
  * WMLAB_SELFTEST=1 runs a headless smoke test (always in local mode) and prints
  * "SELFTEST OK" or "SELFTEST FAIL: <raison>" before exiting with code 0 / 1.
@@ -37,6 +40,7 @@ const KILL_GRACE_MS = 3_000;
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
 const SETUP_COMMAND = "uv sync --extra train --extra server";
 const REMOTE_TIMEOUT_MS = 10_000;
+const LOGOUT_TIMEOUT_MS = 3_000;
 
 app.setName(APP_NAME);
 
@@ -611,7 +615,12 @@ function loadRenderer() {
   win.loadFile(index).catch(() => undefined);
 }
 
-/** Remote mode: check the server answers /api/health, then load the UI (no backend). */
+/**
+ * Remote mode: validate the stored session (`validateRemote`: /api/health, then /api/me), then
+ * load the UI (no backend). Without a session, or when the server refuses it (expired,
+ * revoked, account disabled), the UI shows « Connexion requise » / « Session expirée » and the
+ * connection dialog opens.
+ */
 async function bootRemote() {
   if (state.starting) return;
   state.starting = true;
@@ -621,12 +630,20 @@ async function bootRemote() {
     }
     await stopBackend();
     selftestLog(`mode distant : ${state.remote.apiBase}`);
-    const res = await fetchJson(`${state.remote.apiBase}/api/health`, state.remote.token, REMOTE_TIMEOUT_MS);
-    if (res.status !== 200 || !res.body || res.body.ok !== true) {
-      throw new StartupError("remote", `${state.remote.apiBase} ne répond pas comme un backend Watermark Lab (HTTP ${res.status}).`);
+    let needsLogin = !state.remote.token;
+    if (state.remote.token) {
+      const res = await validateRemote(state.remote.apiBase, state.remote.token);
+      if (!res.ok && !res.refused) throw new StartupError("remote", res.error);
+      needsLogin = !res.ok;
+    } else {
+      const res = await fetchJson(`${state.remote.apiBase}/api/health`, null, REMOTE_TIMEOUT_MS).catch(() => null);
+      if (!res || res.status !== 200 || !res.body || res.body.ok !== true) {
+        throw new StartupError("remote", res ? `${state.remote.apiBase} ne répond pas comme un backend Watermark Lab (HTTP ${res.status}).` : `Serveur injoignable : ${state.remote.apiBase}`);
+      }
     }
     state.starting = false;
     loadRenderer();
+    if (needsLogin) openConnectDialog();
   } catch (err) {
     showError({
       title: "Serveur distant injoignable",
@@ -701,55 +718,110 @@ async function changeWorkspace() {
 // Remote server (§12.6): connection dialog, mode switching
 // ---------------------------------------------------------------------------
 
-/** GET `url` with the token header; resolves {status, body} (body parsed as JSON when possible). */
-async function fetchJson(url, token, timeoutMs) {
+/**
+ * Request `url` (GET, or POST with a JSON body) with the token header; resolves
+ * {status, body, retryAfter} (body parsed as JSON when possible, `Retry-After` in seconds).
+ */
+async function fetchJson(url, token, timeoutMs, { method = "GET", body } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const headers = { Accept: "application/json" };
     if (token) headers["X-WMLab-Token"] = token;
-    const res = await fetch(url, { headers, signal: ctrl.signal });
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: ctrl.signal });
     const text = await res.text();
-    let body = null;
+    let parsed = null;
     try {
-      body = text ? JSON.parse(text) : null;
+      parsed = text ? JSON.parse(text) : null;
     } catch {
-      body = text;
+      parsed = text;
     }
-    return { status: res.status, body };
+    const retryAfter = Number(res.headers.get("retry-after"));
+    return { status: res.status, body: parsed, retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null };
   } finally {
     clearTimeout(timer);
   }
 }
 
-/**
- * Validate a remote connection: /api/health must answer {ok: true}, then /api/me with the
- * token must return the user (an older backend without /api/me is accepted when /api/health
- * returned `workspace`, only sent to an authenticated request).
- */
-async function validateRemote(apiBase, token) {
+/** `detail` of an error response (French, from the backend), or null. */
+function detailOf(res) {
+  return res && res.body && typeof res.body === "object" && typeof res.body.detail === "string" ? res.body.detail : null;
+}
+
+/** /api/health must answer {ok: true}: resolves null, or a French error. */
+async function checkHealth(apiBase, token) {
   let health;
   try {
     health = await fetchJson(`${apiBase}/api/health`, token, REMOTE_TIMEOUT_MS);
   } catch {
-    return { ok: false, error: `Serveur injoignable : ${apiBase}` };
+    return { error: `Serveur injoignable : ${apiBase}`, health: null };
   }
   if (health.status !== 200 || !health.body || health.body.ok !== true) {
-    return { ok: false, error: `${apiBase} ne répond pas comme un backend Watermark Lab (HTTP ${health.status}).` };
+    return { error: `${apiBase} ne répond pas comme un backend Watermark Lab (HTTP ${health.status}).`, health: null };
   }
+  return { error: null, health };
+}
+
+/**
+ * Validate a stored session: /api/health must answer {ok: true}, then /api/me with the token
+ * must return the user (an older backend without /api/me is accepted when /api/health returned
+ * `workspace`, only sent to an authenticated request). `refused`: the server answered but no
+ * longer accepts the session (login required).
+ */
+async function validateRemote(apiBase, token) {
+  const { error, health } = await checkHealth(apiBase, token);
+  if (error) return { ok: false, refused: false, error };
   let me;
   try {
     me = await fetchJson(`${apiBase}/api/me`, token, REMOTE_TIMEOUT_MS);
   } catch {
-    return { ok: false, error: "Le serveur n'a pas répondu à la vérification du jeton." };
+    return { ok: false, refused: false, error: "Le serveur n'a pas répondu à la vérification de la session." };
   }
   if (me.status === 200 && me.body && typeof me.body.name === "string") return { ok: true, name: me.body.name, role: me.body.role };
   if (me.status === 404 && typeof health.body.workspace === "string") return { ok: true, name: "admin", role: "admin" };
   if (me.status === 401 || me.status === 403 || me.status === 404) {
-    return { ok: false, error: "Jeton refusé par le serveur. Vérifiez-le ou demandez-en un nouveau à un administrateur (wmlab users add)." };
+    return { ok: false, refused: true, error: "Session refusée par le serveur (expirée ou révoquée) : reconnectez-vous." };
   }
-  const detail = me.body && typeof me.body === "object" && typeof me.body.detail === "string" ? me.body.detail : `HTTP ${me.status}`;
-  return { ok: false, error: `Vérification du jeton impossible : ${detail}` };
+  return { ok: false, refused: false, error: `Vérification de la session impossible : ${detailOf(me) || `HTTP ${me.status}`}` };
+}
+
+/**
+ * Log in with e-mail + password (`POST /api/auth/login`, §12.2): resolves {ok, token, name,
+ * role} or {ok: false, error} with the backend message as is (401 wrong credentials, 403
+ * account pending / disabled, 429 too many attempts). The password is never stored.
+ */
+async function loginRemote(apiBase, email, password) {
+  const { error } = await checkHealth(apiBase, null);
+  if (error) return { ok: false, error };
+  let res;
+  try {
+    res = await fetchJson(`${apiBase}/api/auth/login`, null, REMOTE_TIMEOUT_MS, { method: "POST", body: { email, password } });
+  } catch {
+    return { ok: false, error: "Le serveur n'a pas répondu à la connexion." };
+  }
+  if (res.status === 200 && res.body && typeof res.body.token === "string" && res.body.token) {
+    const user = res.body.user || {};
+    return { ok: true, token: res.body.token, name: typeof user.name === "string" ? user.name : email, role: user.role };
+  }
+  const detail = detailOf(res);
+  if (detail) return { ok: false, error: detail };
+  if (res.status === 401) return { ok: false, error: "E-mail ou mot de passe incorrect." };
+  if (res.status === 404 || res.status === 405) return { ok: false, error: `${apiBase} ne propose pas la connexion par e-mail : le serveur est-il à jour ?` };
+  if (res.status === 429) {
+    return { ok: false, error: res.retryAfter ? `Trop de tentatives : réessayez dans ${Math.max(1, Math.ceil(res.retryAfter / 60))} min.` : "Trop de tentatives : réessayez plus tard." };
+  }
+  return { ok: false, error: `Connexion impossible (HTTP ${res.status}).` };
+}
+
+/** Revoke a session (`POST /api/auth/logout`), best effort with a short timeout. */
+async function logoutRemote(apiBase, token) {
+  if (!apiBase || !token) return;
+  try {
+    await fetchJson(`${apiBase}/api/auth/logout`, token, LOGOUT_TIMEOUT_MS, { method: "POST", body: {} });
+  } catch {
+    /* offline server, timeout: the session expires on its own */
+  }
 }
 
 function connectPage() {
@@ -779,16 +851,18 @@ function connectPage() {
   <label for="url">Adresse du serveur</label>
   <input id="url" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="https://lab.example.com" spellcheck="false">
   <div class="hint">URL publique du backend Watermark Lab (HTTPS).</div>
-  <label for="token">Jeton personnel</label>
-  <input id="token" type="password" placeholder="wml_…">
-  <div class="hint">Fourni par un administrateur (<code>wmlab users add &lt;nom&gt;</code>). Stocké chiffré sur ce Mac.</div>
+  <label for="email">E-mail</label>
+  <input id="email" type="email" autocapitalize="off" autocorrect="off" placeholder="prenom@exemple.com" spellcheck="false">
+  <label for="password">Mot de passe</label>
+  <input id="password" type="password">
+  <div class="hint">Le mot de passe n'est pas conservé : seule la session (valable 30 jours) est enregistrée, chiffrée, sur ce Mac. Pas encore de compte ? Demandez-le depuis la page du serveur dans un navigateur.</div>
   <div id="status" role="status"></div>
   <div class="row"><button type="button" id="cancel">Annuler</button><button type="submit" id="submit" class="primary">Se connecter</button></div>
 </form>
 </main></body></html>`;
 }
 
-/** Small modal dialog: server URL + token, validated by `validateRemote` (see connect-preload.cjs). */
+/** Small modal dialog: server URL + e-mail + password, sent to `loginRemote` (see connect-preload.cjs). */
 function openConnectDialog() {
   if (state.connectWindow && !state.connectWindow.isDestroyed()) {
     state.connectWindow.focus();
@@ -797,7 +871,7 @@ function openConnectDialog() {
   const parent = state.window && !state.window.isDestroyed() ? state.window : undefined;
   const win = new BrowserWindow({
     width: 480,
-    height: 430,
+    height: 500,
     parent,
     modal: !!parent,
     show: false,
@@ -845,14 +919,21 @@ function installConnectIpc() {
   ipcMain.handle("wmlab:connect", async (event, payload) => {
     if (!fromConnectWindow(event)) return { ok: false, error: "Requête refusée." };
     const apiBase = normalizeApiBase(payload && payload.apiBase);
-    const token = payload && typeof payload.token === "string" ? payload.token.trim() : "";
+    const email = payload && typeof payload.email === "string" ? payload.email.trim().toLowerCase() : "";
+    const password = payload && typeof payload.password === "string" ? payload.password : "";
     if (!apiBase) return { ok: false, error: "Adresse invalide : indiquez une URL http(s)." };
-    if (!token) return { ok: false, error: "Indiquez votre jeton." };
-    const res = await validateRemote(apiBase, token);
-    if (!res.ok) return res;
-    saveRemoteConfig(apiBase, token);
+    if (!email) return { ok: false, error: "Indiquez votre e-mail." };
+    if (!password) return { ok: false, error: "Indiquez votre mot de passe." };
+    const res = await loginRemote(apiBase, email, password);
+    if (!res.ok) return { ok: false, error: res.error };
+    // A previous session on another server (or account) is revoked before being replaced.
+    if (state.remote.token && (state.remote.apiBase !== apiBase || state.remote.token !== res.token)) {
+      void logoutRemote(state.remote.apiBase, state.remote.token);
+    }
+    // Only the session token is kept — never the password.
+    saveRemoteConfig(apiBase, res.token);
     state.mode = "remote";
-    state.remote = { apiBase, token };
+    state.remote = { apiBase, token: res.token };
     buildMenu();
     setTimeout(() => {
       closeConnectDialog();
@@ -878,14 +959,19 @@ async function useLocalBackend() {
   await boot();
 }
 
-/** "Se déconnecter" in remote mode: forget the token (the URL is kept), reopen the dialog. */
+/**
+ * "Se déconnecter" in remote mode: revoke the session on the server (best effort, short
+ * timeout), forget it (the URL is kept), reopen the dialog.
+ */
 async function disconnectRemote() {
   if (state.mode !== "remote") return;
+  const { apiBase, token } = state.remote;
   saveConfig({ token: null, tokenEncrypted: null });
-  state.remote = { apiBase: state.remote.apiBase, token: "" };
+  state.remote = { apiBase, token: "" };
   if (state.window && !state.window.isDestroyed()) {
-    state.window.loadURL(dataUrl(pageShell(`<h1>Déconnecté</h1><p>Le jeton a été oublié. <b>Serveur → Se connecter à un serveur distant…</b> pour vous reconnecter, ou <b>Serveur → Utiliser le backend local</b>.</p>`))).catch(() => undefined);
+    state.window.loadURL(dataUrl(pageShell(`<h1>Déconnecté</h1><p>La session a été fermée. <b>Serveur → Se connecter à un serveur distant…</b> pour vous reconnecter, ou <b>Serveur → Utiliser le backend local</b>.</p>`))).catch(() => undefined);
   }
+  await logoutRemote(apiBase, token);
   openConnectDialog();
 }
 

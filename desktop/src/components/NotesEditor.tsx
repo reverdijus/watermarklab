@@ -19,13 +19,30 @@ export interface NotesEditorProps {
   /** Short sentence shown next to the mode switch. */
   description: React.ReactNode;
   placeholder?: string;
+  /** Member (read-only, §12.6): rendered Markdown only, no editing. */
+  readOnly?: boolean;
 }
 
 /**
  * Markdown notes editor (edit / split / preview) with ⌘S, unsaved-draft memory across
  * navigation and server-side change following while there are no local edits.
+ * `readOnly`: the rendered notes only.
  */
-export function NotesEditor({ draftKey, notes, save, saving = false, description, placeholder }: NotesEditorProps) {
+export function NotesEditor(props: NotesEditorProps) {
+  if (props.readOnly) {
+    return (
+      <div className="space-y-3">
+        <div className="text-[12.5px] text-muted">{props.description}</div>
+        <Card className="min-h-[240px]">
+          <Markdown source={props.notes} empty="Aucune note pour l'instant." />
+        </Card>
+      </div>
+    );
+  }
+  return <EditableNotes {...props} />;
+}
+
+function EditableNotes({ draftKey, notes, save, saving = false, description, placeholder }: NotesEditorProps) {
   // An unsaved draft from a previous visit (other tab / page) is restored when notes.md
   // has not changed on the server in the meantime.
   const [draft, setDraft] = useState(() => restoreDraft(draftKey, notes) ?? notes);

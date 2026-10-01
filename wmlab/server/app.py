@@ -17,7 +17,6 @@ from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -52,7 +51,30 @@ from wmlab.server.jobs import SAFE_ID, JobError, JobManager
 from wmlab.server.leaderboard import leaderboard, project_best
 from wmlab.server import hostops
 from wmlab.server.scaleway import ScalewayClient
-from wmlab.users import ADMIN_USER, UserStore, users_path
+from wmlab.server.auth import (
+    DOWNLOAD_HEADERS,
+    FORBIDDEN_DETAIL,
+    INLINE_MEDIA_TYPES,
+    MEMBER_RUN_FILE_PREFIX,
+    BodyLimitMiddleware,
+    PUBLIC_PATHS,
+    UNAUTHORIZED_DETAIL,
+    audit,
+    current_user,
+    identify,
+    is_member,
+    member_denied,
+    redact_dataset,
+    redact_host,
+    redact_job,
+    redact_run_detail,
+    redact_run_summary,
+    redact_study_detail,
+    register_auth_errors,
+    register_auth_routes,
+    require_admin,
+)
+from wmlab.users import UserStore
 from wmlab.server.views import (
     as_float,
     checkpoint_view,
@@ -74,9 +96,10 @@ from wmlab.server.views import (
 
 log = logging.getLogger("wmlab.server")
 
-TOKEN_HEADER = b"x-wmlab-token"
-PUBLIC_PATHS = ("/api/health",)
 RUN_EVENTS_LIMIT = 2000
+MAX_POINTS = 5000          # upper bound of ?max_points= (metrics, system, compare)
+COMPARE_MAX_RUNS = 20
+MIN_TOKEN_LEN = 16         # explicit server token outside the loopback
 RECENT_RUNS = 10
 RECENT_JOBS = 10
 
@@ -155,12 +178,15 @@ class EstimateBody(BaseModel):
 
 # -- middleware ---------------------------------------------------------------------------------
 class TokenMiddleware:
-    """Require ``X-WMLab-Token`` (or ``?token=``) on ``/api/*`` except ``/api/health``.
+    """Authenticate ``/api/*`` and apply the role policy (§9, §12.2).
 
-    A token is valid when it equals the server token (implicit user ``admin``) or belongs to
-    a non-revoked user of ``users.yaml`` (§12.2). ``scope["wmlab_authenticated"]`` tells the
-    public routes whether a valid token was supplied and ``scope["wmlab_user"]`` is
-    ``{"name", "role"}`` of the caller.
+    The ``X-WMLab-Token`` header carries the server token (implicit ``admin``) or a session
+    token of an active account; ``?token=`` is only read on the two download routes. Public
+    routes (health, login, register) pass without identity; everything else answers 401.
+    A ``member`` is read-only: non-GET requests (except logout / password) and the GET routes
+    that describe the code or the infrastructure answer 403. ``scope["wmlab_authenticated"]``
+    and ``scope["wmlab_user"]`` (``{id, name, email, role, auth, session_id}``) are set for
+    the routes.
     """
 
     def __init__(self, app: Any, token: str | None, users: UserStore | None = None) -> None:
@@ -168,56 +194,31 @@ class TokenMiddleware:
         self.token = token
         self.users = users
 
-    def _supplied(self, scope: dict) -> bytes:
-        supplied = dict(scope.get("headers") or []).get(TOKEN_HEADER, b"")
-        if not supplied:
-            query = parse_qs((scope.get("query_string") or b"").decode("latin-1"))
-            supplied = (query.get("token") or [""])[0].encode("utf-8")
-        return supplied
-
-    def _identify(self, scope: dict) -> dict[str, str] | None:
-        """The user of the request, ``None`` when the token is missing or invalid."""
-        supplied = self._supplied(scope)
-        # bytes: ``compare_digest`` refuses non-ASCII str (a stray client must get 401, not 500)
-        if self.token is not None and supplied and \
-                secrets.compare_digest(supplied, self.token.encode("utf-8")):
-            return dict(ADMIN_USER)
-        if self.users is not None and supplied:
-            user = self.users.resolve(supplied)
-            if user is not None:
-                return user.identity()
-        if self.token is None:
-            return dict(ADMIN_USER)  # no token configured (tests, embedding): open access
-        return None
-
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "websocket" and str(scope.get("path", "")).startswith("/api/"):
+            await send({"type": "websocket.close", "code": 1008})  # no WebSocket API
+            return
         if (scope["type"] != "http" or scope.get("method") == "OPTIONS"
                 or not scope["path"].startswith("/api/")):
             await self.app(scope, receive, send)
             return
-        user = self._identify(scope)
+        user = identify(scope, self.token, self.users)
         scope["wmlab_authenticated"] = user is not None
         scope["wmlab_user"] = user
-        if user is not None or scope["path"] in PUBLIC_PATHS:
+        path, method = scope["path"], str(scope.get("method") or "GET").upper()
+        if path in PUBLIC_PATHS:  # health, login, register: whoever calls them
             await self.app(scope, receive, send)
             return
-        response = JSONResponse({"detail": "Accès refusé : jeton de session manquant ou invalide "
-                                           "(en-tête X-WMLab-Token)."}, status_code=401)
-        await response(scope, receive, send)
-
-
-def current_user(request: Request) -> dict[str, str]:
-    user = request.scope.get("wmlab_user")
-    return dict(user) if isinstance(user, dict) else dict(ADMIN_USER)
-
-
-def require_admin(request: Request) -> dict[str, str]:
-    """403 (French) for a ``member`` on an admin route."""
-    user = current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(403, "Action réservée aux administrateurs : demandez à un "
-                                 "administrateur du serveur.")
-    return user
+        if user is None:
+            response = JSONResponse({"detail": UNAUTHORIZED_DETAIL}, status_code=401)
+            await response(scope, receive, send)
+            return
+        if user.get("role") != "admin" and member_denied(method, path):
+            audit("forbidden", user=user.get("name"), method=method, path=path)
+            response = JSONResponse({"detail": FORBIDDEN_DETAIL}, status_code=403)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 # -- server state -------------------------------------------------------------------------------
@@ -236,7 +237,7 @@ class ServerState:
         self.indexer = Indexer.for_context(ctx, self.db)
         self.repo = GitRepo(ctx.workspace, ctx.data)
         self.gitsync = GitSync(self.repo, self.settings)
-        self.users = UserStore(users_path(ctx.data))
+        self.users = UserStore(ctx.data)
         self.jobs = JobManager(ctx, runner=runner, cli_prefix=cli_prefix,
                                remote_cli_prefix=remote_cli_prefix, sync=sync,
                                poll_interval=poll_interval, repo=self.repo,
@@ -513,10 +514,13 @@ def create_app(workspace: Path, token: str | None, sync: bool = True, *,
     # run is live: compress every response above 1 kB when the client accepts gzip.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.add_middleware(TokenMiddleware, token=token, users=state.users)
+    app.add_middleware(BodyLimitMiddleware)
     if token is not None:  # cross-origin access (Vite dev server) is only safe with a token
         app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                           allow_headers=["*"])
-    _register_errors(app)
+                           allow_headers=["*"], expose_headers=["Retry-After"])
+    _register_errors(app, state)
+    register_auth_errors(app)
+    register_auth_routes(app, state)
     _register_routes(app, state)
     dist = ctx.workspace / "desktop" / "dist"
     if (dist / "index.html").is_file():
@@ -524,9 +528,26 @@ def create_app(workspace: Path, token: str | None, sync: bool = True, *,
     return app
 
 
+#: Security headers of the served frontend (§12.7; Caddy adds HSTS on top). The CSP matches the
+#: Vite build: external hashed scripts and styles, inline ``style`` attributes (ECharts,
+#: CodeMirror), same-origin API, media and sample images (``blob:`` for client-side downloads).
+SPA_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; "
+        "object-src 'none'"),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
 class _DesktopFiles(StaticFiles):
-    """``desktop/dist`` with cache headers: ``index.html`` is revalidated on every load (a
-    rebuild must not be masked by a cached page) while the hashed ``assets/`` are immutable."""
+    """``desktop/dist`` with cache and security headers: ``index.html`` is revalidated on every
+    load (a rebuild must not be masked by a cached page) while the hashed ``assets/`` are
+    immutable; every page carries ``SPA_SECURITY_HEADERS``."""
 
     def file_response(self, full_path: os.PathLike[str] | str, stat_result: os.stat_result,
                       scope: Any, status_code: int = 200) -> Response:
@@ -536,10 +557,12 @@ class _DesktopFiles(StaticFiles):
             response.headers["Cache-Control"] = "no-cache"
         elif name.parent.name == "assets":
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        for header, value in SPA_SECURITY_HEADERS.items():
+            response.headers[header] = value
         return response
 
 
-def _register_errors(app: FastAPI) -> None:
+def _register_errors(app: FastAPI, state: ServerState) -> None:
     @app.exception_handler(HTTPException)
     async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
         return JSONResponse({"detail": str(exc.detail)}, status_code=exc.status_code,
@@ -575,11 +598,18 @@ def _register_errors(app: FastAPI) -> None:
 
     @app.exception_handler(FileNotFoundError)
     async def missing_file(_: Request, exc: FileNotFoundError) -> JSONResponse:
+        if state.hosted():  # never a server path towards a browser
+            log.info("fichier introuvable : %s", exc)
+            return _error(404, "Fichier introuvable ou illisible.")
         return _error(404, f"Fichier introuvable ou illisible : {exc}")
 
     @app.exception_handler(Exception)
     async def internal_error(_: Request, exc: Exception) -> JSONResponse:
-        log.exception("erreur interne")
+        ref = secrets.token_hex(4)
+        log.exception("erreur interne (réf. %s)", ref)
+        if state.hosted():  # the details (paths, versions) stay in server.log
+            return _error(500, f"Erreur interne du serveur (réf. {ref}) : consultez le journal "
+                               "du serveur.")
         return _error(500, f"Erreur interne du serveur : {type(exc).__name__}: {exc}")
 
 
@@ -590,31 +620,25 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
     # -- health & overview ---------------------------------------------------------------------
     @app.get("/api/health")
     def health(request: Request) -> dict[str, Any]:
-        body: dict[str, Any] = {"ok": True, "version": __version__}
-        if request.scope.get("wmlab_authenticated", True):
-            body["workspace"] = str(ws)  # not for an unauthenticated page (CORS is open)
+        hosted = state.settings().hosted
+        body: dict[str, Any] = {"ok": True, "version": __version__,
+                                "hosted": bool(hosted.enabled),
+                                "registration": bool(hosted.allow_registration)}
+        if request.scope.get("wmlab_authenticated", True) and not is_member(request):
+            body["workspace"] = str(ws)  # server path: admins only (CORS is open)
         return body
 
-    # -- identity (§12.2) ----------------------------------------------------------------------
-    @app.get("/api/me")
-    def me(request: Request) -> dict[str, Any]:
-        user = current_user(request)
-        hosted = state.settings().hosted
-        return {"name": user["name"], "role": user["role"], "hosted": bool(hosted.enabled),
-                "public_url": hosted.public_url}
-
-    @app.get("/api/users")
-    def list_users(request: Request) -> list[dict[str, Any]]:
-        require_admin(request)
-        return [u.to_api() for u in state.users.users()]
+    # identity and accounts (§12.2): /api/me, /api/auth/*, /api/users* — wmlab.server.auth
 
     # -- git (§12.3) ---------------------------------------------------------------------------
     @app.get("/api/git")
-    def git_state() -> dict[str, Any]:
+    def git_state(request: Request) -> dict[str, Any]:
+        require_admin(request)
         return state.repo.state(state.hosted())
 
     @app.post("/api/git/pull")
-    def git_pull() -> dict[str, Any]:
+    def git_pull(request: Request) -> dict[str, Any]:
+        require_admin(request)
         if not state.repo.available:
             raise HTTPException(400, "Aucun dépôt git dans le workspace.")
         if state.repo.dirty():
@@ -627,7 +651,9 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         return state.repo.state(state.hosted())
 
     @app.get("/api/overview")
-    def overview() -> dict[str, Any]:
+    def overview(request: Request) -> dict[str, Any]:
+        member = is_member(request)
+        view = redact_run_summary if member else (lambda summary: summary)
         snap = state.snapshot()
         settings = state.settings()
         items = _cost_items(state, snap)
@@ -640,7 +666,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         jobs = state.jobs.list()
         shown_jobs = [j for j in jobs if j.active] + [j for j in jobs if not j.active][:RECENT_JOBS]
         return {
-            "workspace": {"name": settings.name, "path": str(ws)},
+            "workspace": {"name": settings.name, "path": "" if member else str(ws)},
             "budget": {"total_eur": total, "spent_eur": spent,
                        "remaining_eur": round(total - spent, 2),
                        "running_eur_per_hour": round(_running_rate(state, snap), 4)},
@@ -651,11 +677,11 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
                 "studies": len(snap.studies),
                 "gpu_hours": costs.gpu_hours(items),
             },
-            "running": [run_summary(m) for m in runs if m.get("status") == "running"],
-            "recent": [run_summary(m) for m in runs if not m.get("study")][:RECENT_RUNS],
+            "running": [view(run_summary(m)) for m in runs if m.get("status") == "running"],
+            "recent": [view(run_summary(m)) for m in runs if not m.get("study")][:RECENT_RUNS],
             "projects": [_project_summary(folder, snap, by_project)
                          for folder in catalog.project_dirs(ws)],
-            "jobs": [j.to_api() for j in shown_jobs],
+            "jobs": [redact_job(j.to_api()) if member else j.to_api() for j in shown_jobs],
         }
 
     # -- projects ------------------------------------------------------------------------------
@@ -728,7 +754,8 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
 
     # -- files & validation --------------------------------------------------------------------
     @app.get("/api/files")
-    def read_file(path: str = Query(...)) -> dict[str, Any]:
+    def read_file(request: Request, path: str = Query(...)) -> dict[str, Any]:
+        require_admin(request)  # the code and the specs are never served to a member
         target, rel = catalog.resolve_workspace_file(ws, path, data_root=ctx.data)
         content = catalog.read_text_file(target)
         kind = catalog.file_kind(target)
@@ -737,6 +764,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
 
     @app.put("/api/files")
     def write_file(body: FileWrite, request: Request) -> dict[str, Any]:
+        require_admin(request)
         target, rel = catalog.resolve_workspace_file(ws, body.path, write=True,
                                                      data_root=ctx.data)
         if len(body.content.encode("utf-8")) > catalog.MAX_FILE_BYTES:
@@ -753,7 +781,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
                     "l'utilisent et ne seraient plus comparables. Créez une nouvelle version "
                     f"(benchmarks/<modalité>_v<N+1>.yaml) au lieu de le modifier."))
         write_text_atomic(target, body.content)
-        log.info("fichier enregistré : %s", rel)
+        audit("file-saved", user=current_user(request)["name"], path=rel)
         kind = catalog.file_kind(target)
         validation = catalog.file_validation(target, body.content, kind)
         if rel.startswith("lab/") and kind == "python" and validation["valid"]:
@@ -778,7 +806,8 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         return catalog.validate_payload(ws, body.content, body.kind, body.path)
 
     @app.get("/api/registry")
-    def registry(reload: bool = False) -> dict[str, Any]:
+    def registry(request: Request, reload: bool = False) -> dict[str, Any]:
+        require_admin(request)
         report = state.plugins(reload=reload)
         return {"entries": {kind: reg.describe() for kind, reg in REGISTRIES.items()},
                 "errors": [{"module": str(e.get("module", "")), "error": str(e.get("error", ""))}
@@ -786,9 +815,10 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
 
     # -- runs ----------------------------------------------------------------------------------
     @app.get("/api/runs")
-    def list_runs(project: str | None = None, experiment: str | None = None,
+    def list_runs(request: Request, project: str | None = None, experiment: str | None = None,
                   status: str | None = None, study: str | None = None, host: str | None = None,
                   include_trials: bool = False, limit: int = 500) -> list[dict[str, Any]]:
+        view = redact_run_summary if is_member(request) else (lambda summary: summary)
         statuses = set(_csv_list(status))
         runs = []
         for m in state.snapshot().runs:
@@ -806,39 +836,50 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
                 continue
             runs.append(m)
         runs.sort(key=_created_key, reverse=True)
-        return [run_summary(m) for m in runs[:max(1, min(limit, 10000))]]
+        return [view(run_summary(m)) for m in runs[:max(1, min(limit, 10000))]]
 
     @app.get("/api/runs/{run_id}")
-    def get_run(run_id: str) -> dict[str, Any]:
-        return _run_detail(_run_dir(state, run_id))
+    def get_run(run_id: str, request: Request) -> dict[str, Any]:
+        detail = _run_detail(_run_dir(state, run_id))
+        return redact_run_detail(detail) if is_member(request) else detail
 
     @app.get("/api/runs/{run_id}/metrics")
     def run_metrics(run_id: str, keys: str | None = None,
                     max_points: int = 1000) -> dict[str, Any]:
         reader = RunReader(_run_dir(state, run_id))
         plan = _plan(reader.spec())
-        return {"series": reader.metrics(_csv_list(keys) or None, max(max_points, 2)),
+        return {"series": reader.metrics(_csv_list(keys) or None, max(2, min(max_points, MAX_POINTS))),
                 "phases": [{"name": n, "start": s, "end": e} for n, s, e in plan.bounds]
                 if plan is not None else []}
 
     @app.get("/api/runs/{run_id}/system")
     def run_system(run_id: str, max_points: int = 500) -> dict[str, Any]:
-        return RunReader(_run_dir(state, run_id)).system(max(max_points, 2))
+        return RunReader(_run_dir(state, run_id)).system(max(2, min(max_points, MAX_POINTS)))
 
     @app.get("/api/runs/{run_id}/logs")
-    def run_logs(run_id: str, tail: int = 500) -> dict[str, Any]:
+    def run_logs(run_id: str, request: Request, tail: int = 500) -> dict[str, Any]:
+        require_admin(request)  # commands and tracebacks
         return {"lines": RunReader(_run_dir(state, run_id)).logs(max(0, min(tail, 20000)))}
 
     @app.get("/api/runs/{run_id}/file")
-    def run_file(run_id: str, path: str = Query(...)) -> FileResponse:
+    def run_file(run_id: str, request: Request, path: str = Query(...)) -> FileResponse:
         run_dir = _run_dir(state, run_id).resolve()
         target = (run_dir / path).resolve()
         if not target.is_relative_to(run_dir) or target == run_dir:
             raise HTTPException(403, "Accès refusé : fichier hors du dossier du run.")
+        rel = target.relative_to(run_dir).as_posix()
+        if is_member(request) and not rel.startswith(MEMBER_RUN_FILE_PREFIX):
+            # checkpoints (weights), spec.yaml, logs: never for a read-only member
+            raise HTTPException(403, "Accès réservé aux administrateurs : seuls les échantillons "
+                                     "du run sont consultables.")
         if not target.is_file():
             raise HTTPException(404, f"Fichier introuvable dans le run : {path}")
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        return FileResponse(target, media_type=media_type)
+        if media_type in INLINE_MEDIA_TYPES:
+            return FileResponse(target, media_type=media_type, headers=dict(DOWNLOAD_HEADERS))
+        # anything else (HTML, SVG, scripts, .pt…) is a download, never a page of this origin
+        return FileResponse(target, media_type="application/octet-stream",
+                            headers=dict(DOWNLOAD_HEADERS), filename=target.name)
 
     @app.put("/api/runs/{run_id}/notes")
     def set_notes(run_id: str, body: NotesBody) -> dict[str, Any]:
@@ -862,9 +903,10 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/stop")
-    def stop_run(run_id: str) -> dict[str, Any]:
+    def stop_run(run_id: str, request: Request) -> dict[str, Any]:
         _run_dir(state, run_id)
         job = state.jobs.stop_run(run_id)
+        audit("run-stopped", user=current_user(request)["name"], run=run_id)
         return job.to_api() if job is not None else {"ok": True}
 
     @app.post("/api/runs/{run_id}/checkpoints/{name}/fetch")
@@ -874,11 +916,12 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         return {"ok": True}
 
     @app.get("/api/compare")
-    def compare(runs: str = "", keys: str | None = None,
+    def compare(request: Request, runs: str = "", keys: str | None = None,
                 max_points: int = 500) -> dict[str, Any]:
+        view = redact_run_summary if is_member(request) else (lambda summary: summary)
         summaries, series = [], {}
         wanted = _csv_list(keys) or None
-        for run_id in dict.fromkeys(_csv_list(runs)):
+        for run_id in list(dict.fromkeys(_csv_list(runs)))[:COMPARE_MAX_RUNS]:
             if not SAFE_ID.match(run_id) or ".." in run_id:
                 continue
             run_dir = ctx.runs_dir / run_id
@@ -887,8 +930,8 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
             reader = RunReader(run_dir)
             manifest = reader.manifest()
             manifest["run_id"] = run_id
-            summaries.append(run_summary(manifest))
-            series[run_id] = reader.metrics(wanted, max(max_points, 2))
+            summaries.append(view(run_summary(manifest)))
+            series[run_id] = reader.metrics(wanted, max(2, min(max_points, MAX_POINTS)))
         return {"runs": summaries, "series": series}
 
     # -- studies -------------------------------------------------------------------------------
@@ -900,7 +943,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         return [study_summary(m, m.get("_stats") or {}) for m in studies]
 
     @app.get("/api/studies/{study_id}")
-    def get_study(study_id: str) -> dict[str, Any]:
+    def get_study(study_id: str, request: Request) -> dict[str, Any]:
         study_dir = _study_dir(state, study_id)
         reader = StudyReader(study_dir)
         manifest = reader.manifest()
@@ -910,7 +953,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         summary = study_summary(manifest, trial_stats(trials), spec)
         directions = [o["direction"] for o in summary["objectives"]]
         space = spec.get("space") if isinstance(spec.get("space"), dict) else None
-        return {
+        detail = {
             **summary,
             "spec": spec,
             "trials": trials,
@@ -918,6 +961,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
             "pareto": pareto_front(trials, directions),
             "notes": reader.notes(),
         }
+        return redact_study_detail(detail) if is_member(request) else detail
 
     @app.put("/api/studies/{study_id}/notes")
     def set_study_notes(study_id: str, body: NotesBody) -> dict[str, Any]:
@@ -939,15 +983,17 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         return [catalog.benchmark_info(ws, p) for p in catalog.yaml_files(ws / "benchmarks")]
 
     @app.get("/api/datasets")
-    def list_datasets() -> list[dict[str, Any]]:
+    def list_datasets(request: Request) -> list[dict[str, Any]]:
         users = catalog.dataset_users(ws)
-        return [catalog.dataset_info(ws, p, users.get(p.stem, []))
-                for p in catalog.yaml_files(ws / "datasets")]
+        infos = [catalog.dataset_info(ws, p, users.get(p.stem, []))
+                 for p in catalog.yaml_files(ws / "datasets")]
+        return [redact_dataset(i) for i in infos] if is_member(request) else infos
 
     # -- hosts ---------------------------------------------------------------------------------
     @app.get("/api/hosts")
-    def list_hosts() -> list[dict[str, Any]]:
-        return [state.jobs.host_view(h) for h in ctx.hosts()]
+    def list_hosts(request: Request) -> list[dict[str, Any]]:
+        views = [state.jobs.host_view(h) for h in ctx.hosts()]
+        return [redact_host(v) for v in views] if is_member(request) else views
 
     @app.put("/api/hosts")
     def save_hosts_route(body: list[dict[str, Any]], request: Request) -> list[dict[str, Any]]:
@@ -956,7 +1002,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         cleaned = [{k: v for k, v in h.items() if k not in computed} if isinstance(h, dict) else h
                    for h in body]
         save_hosts(cleaned, ctx.hosts_path)
-        log.info("hosts.yaml enregistré (%d machines)", len(body))
+        audit("hosts-saved", user=current_user(request)["name"], count=len(body))
         return [state.jobs.host_view(h) for h in ctx.hosts()]
 
     def _known_host(name: str) -> None:
@@ -977,7 +1023,8 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
 
     # -- hosts: inventory, retrieval, decommission (§12.4–12.5) --------------------------------
     @app.get("/api/hosts/{name}/inventory")
-    def host_inventory(name: str) -> dict[str, Any]:
+    def host_inventory(name: str, request: Request) -> dict[str, Any]:
+        require_admin(request)
         _known_host(name)
         return state.jobs.inventory(name)
 
@@ -994,36 +1041,44 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
         if not body.confirm:
             raise HTTPException(400, "Confirmation requise (confirm: true) pour retirer une "
                                      "machine.")
+        audit("host-decommission", user=user["name"], host=name, force=body.force,
+              delete_instance=body.delete_instance)
         return hostops.decommission(state.jobs, name, delete_instance=body.delete_instance,
                                     force=body.force, user=user["name"],
                                     client_factory=state.scaleway)
 
     @app.post("/api/hosts/{name}/poweroff")
     def host_poweroff(name: str, request: Request) -> dict[str, Any]:
-        require_admin(request)
+        user = require_admin(request)
         _known_host(name)
+        audit("host-poweroff", user=user["name"], host=name)
         return hostops.poweroff(state.jobs, name, state.scaleway)
 
     @app.get("/api/hosts/{name}/instance")
-    def host_instance(name: str) -> dict[str, Any]:
+    def host_instance(name: str, request: Request) -> dict[str, Any]:
+        require_admin(request)
         _known_host(name)
         return hostops.instance(state.jobs, name, state.scaleway)
 
     # -- jobs ----------------------------------------------------------------------------------
     @app.get("/api/jobs")
-    def list_jobs(status: str | None = None) -> list[dict[str, Any]]:
+    def list_jobs(request: Request, status: str | None = None) -> list[dict[str, Any]]:
         if not state.jobs.running:
             state.jobs.tick()
-        return [j.to_api() for j in state.jobs.list(status)]
+        jobs = [j.to_api() for j in state.jobs.list(status)]
+        return [redact_job(j) for j in jobs] if is_member(request) else jobs
 
     @app.post("/api/jobs")
     def create_job(body: JobCreate, request: Request) -> dict[str, Any]:
+        user = current_user(request)["name"]
         job = state.jobs.submit(
             kind=body.kind, host=body.host, spec_path=body.spec_path, run_id=body.run_id,
             checkpoint=body.checkpoint, benchmark=body.benchmark, overrides=body.overrides,
             max_hours=body.max_hours, smoke=body.smoke,
             init_from=body.init_from.model_dump() if body.init_from is not None else None,
-            git_ref=body.git_ref, user=current_user(request)["name"])
+            git_ref=body.git_ref, user=user)
+        audit("job-created", user=user, job=job.job_id, kind=job.kind, host=job.host,
+              target=job.target, git_sha=job.git_sha)
         return job.to_api()
 
     @app.post("/api/jobs/estimate")
@@ -1032,8 +1087,10 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
                                    state.snapshot().runs)
 
     @app.post("/api/jobs/{job_id}/cancel")
-    def cancel_job(job_id: str) -> dict[str, Any]:
-        return state.jobs.cancel(job_id).to_api()
+    def cancel_job(job_id: str, request: Request) -> dict[str, Any]:
+        job = state.jobs.cancel(job_id)
+        audit("job-cancelled", user=current_user(request)["name"], job=job_id)
+        return job.to_api()
 
     @app.post("/api/jobs/{job_id}/sync")
     def sync_job(job_id: str) -> dict[str, Any]:
@@ -1056,7 +1113,8 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
                                  f'attachment; filename="watermark-lab-couts-{stamp}.csv"'})
 
     @app.get("/api/settings")
-    def get_settings() -> dict[str, Any]:
+    def get_settings(request: Request) -> dict[str, Any]:
+        require_admin(request)
         return state.settings().model_dump(mode="json")
 
     @app.put("/api/settings")
@@ -1074,7 +1132,7 @@ def _register_routes(app: FastAPI, state: ServerState) -> None:  # noqa: C901 - 
                 existing = {}
         merged = _merge_ordered(existing if isinstance(existing, dict) else {}, new)
         write_text_atomic(ctx.settings_path, dump_yaml(merged))
-        log.info("workspace.yaml enregistré")
+        audit("settings-saved", user=current_user(request)["name"])
         hosted = state.settings().hosted
         if hosted.enabled and hosted.auto_commit and state.repo.available:
             # team settings are shared through git like the specs (§12.3); a failed push
@@ -1090,13 +1148,16 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 def resolve_token(token: str | None, host: str = "127.0.0.1") -> tuple[str, bool]:
-    """Session token of the server: ``--token``, else ``WMLAB_TOKEN``, else a random one.
+    """Server token (implicit admin): ``--token``, else ``WMLAB_TOKEN``, else a random one.
 
     Returns ``(token, generated)``. The API is never left open: a generated token is shown
     once on stderr. Listening outside the loopback requires an explicit token.
     """
     explicit = (token or "").strip() or (os.environ.get("WMLAB_TOKEN") or "").strip()
     if explicit:
+        if host not in LOOPBACK_HOSTS and len(explicit) < MIN_TOKEN_LEN:
+            raise RuntimeError(f"écoute sur {host} : le jeton serveur doit faire au moins "
+                               f"{MIN_TOKEN_LEN} caractères (openssl rand -hex 24)")
         return explicit, False
     if host not in LOOPBACK_HOSTS:
         raise RuntimeError(f"écoute sur {host} : un jeton explicite est requis (--token ou "
@@ -1120,9 +1181,12 @@ def serve(port: int = 8765, token: str | None = None, host: str = "127.0.0.1",
     token, generated = resolve_token(token, host)
     app = create_app(Path(workspace), token, sync)
     if generated:
-        print(f"Jeton de session généré (en-tête X-WMLab-Token) : {token}", file=sys.stderr,
-              flush=True)
-        log.warning("aucun jeton fourni (--token / WMLAB_TOKEN) : jeton de session généré")
+        print(f"Jeton serveur généré (admin implicite, en-tête X-WMLab-Token) : {token}",
+              file=sys.stderr, flush=True)
+        log.warning("aucun jeton fourni (--token / WMLAB_TOKEN) : jeton serveur généré")
     if host not in LOOPBACK_HOSTS:
         log.warning("écoute sur %s : l'API n'est protégée que par le jeton", host)
-    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
+    # proxy_headers / forwarded_allow_ips keep uvicorn's defaults (X-Forwarded-For trusted
+    # from 127.0.0.1 only, i.e. the local Caddy); no Server header.
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False,
+                server_header=False)

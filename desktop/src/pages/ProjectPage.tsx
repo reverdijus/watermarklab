@@ -52,7 +52,7 @@ import { clearDraft, rememberDraft, restoreDraft } from "../lib/drafts";
 import { formatEur, formatRelative, formatSteps, plural, shortId } from "../lib/format";
 import { formatMetric, metricLabel } from "../lib/metrics";
 import { toastFileSaved } from "../components/saveToast";
-import { useProject, useRuns, useSaveFile, useStudies } from "../lib/queries";
+import { usePermissions, useProject, useRuns, useSaveFile, useStudies } from "../lib/queries";
 import { experimentPath, hpoPlanPath, MODALITY_LABELS, runPath, RUN_STATUSES, STATUS_LABELS } from "../lib/runs";
 import type { ExperimentInfo, HpoPlanInfo, Objective, ProjectDetail, ProjectSummary } from "../lib/types";
 
@@ -82,6 +82,7 @@ function ObjectiveText({ label, objective }: { label: string; objective: Objecti
 function BestCard({ summary }: { summary: ProjectSummary }) {
   const navigate = useNavigate();
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   const best = summary.best;
   const q = summary.objectives.quality;
   const r = summary.objectives.robustness;
@@ -124,16 +125,18 @@ function BestCard({ summary }: { summary: ProjectSummary }) {
             <Button size="sm" onClick={() => navigate(runPath(best.run_id, best.source === "benchmark" ? "evals" : undefined))}>
               Ouvrir le run
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              icon={Microscope}
-              onClick={() =>
-                openLaunch({ kind: "eval", project: summary.name, evalRun: best.run_id, evalCheckpoint: best.checkpoint ?? "last" })
-              }
-            >
-              Évaluer
-            </Button>
+            {canWrite && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={Microscope}
+                onClick={() =>
+                  openLaunch({ kind: "eval", project: summary.name, evalRun: best.run_id, evalCheckpoint: best.checkpoint ?? "last" })
+                }
+              >
+                Évaluer
+              </Button>
+            )}
           </div>
         </>
       ) : (
@@ -151,7 +154,7 @@ function BestCard({ summary }: { summary: ProjectSummary }) {
 /** Draft-store key: the card unmounts on every tab change, the draft must outlive it. */
 const notesDraftKey = (project: string) => `project-notes:${project}`;
 
-function NotesCard({ project, notes }: { project: string; notes: string }) {
+function NotesCard({ project, notes, readOnly }: { project: string; notes: string; readOnly: boolean }) {
   const save = useSaveFile();
   const toast = useToast();
   // An unsaved draft from a previous visit reopens the editor (same server content only).
@@ -182,7 +185,7 @@ function NotesCard({ project, notes }: { project: string; notes: string }) {
         icon={NotebookPen}
         description={<span className="font-mono text-[11.5px]">projects/{project}/notes.md</span>}
         actions={
-          editing ? (
+          readOnly ? undefined : editing ? (
             <>
               {dirty && <span className="mr-1 text-[12.5px] text-warning">Modifications non enregistrées</span>}
               <Button
@@ -214,7 +217,7 @@ function NotesCard({ project, notes }: { project: string; notes: string }) {
           )
         }
       />
-      {editing ? (
+      {editing && !readOnly ? (
         <Textarea
           mono
           rows={14}
@@ -240,6 +243,7 @@ function NotesCard({ project, notes }: { project: string; notes: string }) {
 
 function OverviewTab({ detail, onTab }: { detail: ProjectDetail; onTab: (t: TabId) => void }) {
   const s = detail.summary;
+  const { canWrite } = usePermissions();
   const runs = useRuns({ project: s.name, limit: 8 });
   const navigate = useNavigate();
   return (
@@ -283,7 +287,7 @@ function OverviewTab({ detail, onTab }: { detail: ProjectDetail; onTab: (t: TabI
           <RunsTable runs={runs.data ?? []} loading={runs.isLoading} empty="Aucun run dans ce projet pour l'instant." />
         </Section>
         <div className="xl:col-span-2">
-          <NotesCard key={detail.notes} project={s.name} notes={detail.notes} />
+          <NotesCard key={detail.notes} project={s.name} notes={detail.notes} readOnly={!canWrite} />
         </div>
       </div>
     </div>
@@ -297,8 +301,10 @@ function OverviewTab({ detail, onTab }: { detail: ProjectDetail; onTab: (t: TabI
 function ExperimentCard({ project, exp, onDuplicate }: { project: string; exp: ExperimentInfo; onDuplicate: () => void }) {
   const navigate = useNavigate();
   const { openLaunch } = useLaunch();
+  // Member: metadata only — no YAML editor, launch or duplication (§12.6).
+  const { canWrite } = usePermissions();
   return (
-    <Card interactive className="flex flex-col" onClick={() => navigate(experimentPath(project, exp.name))}>
+    <Card interactive={canWrite} className="flex flex-col" onClick={canWrite ? () => navigate(experimentPath(project, exp.name)) : undefined}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate font-mono text-[14px] font-medium text-fg">{exp.name}</div>
@@ -322,6 +328,7 @@ function ExperimentCard({ project, exp, onDuplicate }: { project: string; exp: E
           <span className="tabular">{formatSteps(exp.total_steps)} steps</span>
           <span>{plural(exp.n_runs, "run")}</span>
         </div>
+        {canWrite && (
         <div className="mt-3 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
           <Button size="sm" to={experimentPath(project, exp.name)} icon={FileCode}>
             Ouvrir
@@ -340,6 +347,7 @@ function ExperimentCard({ project, exp, onDuplicate }: { project: string; exp: E
             Dupliquer
           </Button>
         </div>
+        )}
       </div>
     </Card>
   );
@@ -347,15 +355,22 @@ function ExperimentCard({ project, exp, onDuplicate }: { project: string; exp: E
 
 function ExperimentsTab({ detail }: { detail: ProjectDetail }) {
   const [dialog, setDialog] = useState<{ from: string | null } | null>(null);
+  const { canWrite } = usePermissions();
   const name = detail.summary.name;
   return (
     <Section
       title="Expériences"
-      description="Chaque expérience est un fichier YAML (modèle, données, pertes, curriculum de phases)."
+      description={
+        canWrite
+          ? "Chaque expérience est un fichier YAML (modèle, données, pertes, curriculum de phases)."
+          : "Expériences du projet (description, hypothèse, curriculum) ; leur spécification YAML est réservée aux administrateurs."
+      }
       actions={
-        <Button variant="primary" icon={Plus} onClick={() => setDialog({ from: null })}>
-          Nouvelle expérience
-        </Button>
+        canWrite ? (
+          <Button variant="primary" icon={Plus} onClick={() => setDialog({ from: null })}>
+            Nouvelle expérience
+          </Button>
+        ) : undefined
       }
     >
       {detail.experiments.length ? (
@@ -369,15 +384,22 @@ function ExperimentsTab({ detail }: { detail: ProjectDetail }) {
           <EmptyState
             icon={FlaskConical}
             title="Aucune expérience"
-            description="Créez une première expérience : un squelette commenté est généré, prêt à éditer et valider en direct."
+            description={
+              canWrite
+                ? "Créez une première expérience : un squelette commenté est généré, prêt à éditer et valider en direct."
+                : "Aucune expérience n'est encore définie dans ce projet."
+            }
             action={
-              <Button variant="primary" icon={Plus} onClick={() => setDialog({ from: null })}>
-                Nouvelle expérience
-              </Button>
+              canWrite ? (
+                <Button variant="primary" icon={Plus} onClick={() => setDialog({ from: null })}>
+                  Nouvelle expérience
+                </Button>
+              ) : undefined
             }
           />
         </Card>
       )}
+      {canWrite && (
       <NewExperimentDialog
         open={!!dialog}
         onClose={() => setDialog(null)}
@@ -385,6 +407,7 @@ function ExperimentsTab({ detail }: { detail: ProjectDetail }) {
         experiments={detail.experiments}
         from={dialog?.from}
       />
+      )}
     </Section>
   );
 }
@@ -395,6 +418,7 @@ function ExperimentsTab({ detail }: { detail: ProjectDetail }) {
 
 function RunsTab({ detail }: { detail: ProjectDetail }) {
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   const [experiment, setExperiment] = useState("");
   const [status, setStatus] = useState("");
   const [trials, setTrials] = useState(false);
@@ -440,6 +464,8 @@ function RunsTab({ detail }: { detail: ProjectDetail }) {
         empty={
           filtered ? (
             "Aucun run ne correspond à ces filtres."
+          ) : !canWrite ? (
+            "Aucun run dans ce projet."
           ) : (
             <span>
               Aucun run dans ce projet.{" "}
@@ -461,8 +487,9 @@ function RunsTab({ detail }: { detail: ProjectDetail }) {
 function PlanCard({ project, plan }: { project: string; plan: HpoPlanInfo }) {
   const navigate = useNavigate();
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   return (
-    <Card interactive className="flex flex-col" onClick={() => navigate(hpoPlanPath(project, plan.name))}>
+    <Card interactive={canWrite} className="flex flex-col" onClick={canWrite ? () => navigate(hpoPlanPath(project, plan.name)) : undefined}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate font-mono text-[14px] font-medium text-fg">{plan.name}</div>
@@ -486,6 +513,7 @@ function PlanCard({ project, plan }: { project: string; plan: HpoPlanInfo }) {
           <span>{plural(plan.n_params, "paramètre")}</span>
           <span>{plural(plan.n_studies, "étude")}</span>
         </div>
+        {canWrite && (
         <div className="mt-3 flex gap-2" onClick={(e) => e.stopPropagation()}>
           <Button size="sm" icon={FileCode} to={hpoPlanPath(project, plan.name)}>
             Ouvrir
@@ -494,6 +522,7 @@ function PlanCard({ project, plan }: { project: string; plan: HpoPlanInfo }) {
             Lancer
           </Button>
         </div>
+        )}
       </div>
     </Card>
   );
@@ -502,6 +531,7 @@ function PlanCard({ project, plan }: { project: string; plan: HpoPlanInfo }) {
 function HpoTab({ detail }: { detail: ProjectDetail }) {
   const name = detail.summary.name;
   const studies = useStudies(name);
+  const { canWrite } = usePermissions();
   const [open, setOpen] = useState(false);
   return (
     <div className="space-y-10">
@@ -509,9 +539,11 @@ function HpoTab({ detail }: { detail: ProjectDetail }) {
         title="Plans d'optimisation"
         description="Espace de recherche, objectifs, sampler, pruner et budget sur une expérience de base."
         actions={
-          <Button variant="primary" icon={Plus} onClick={() => setOpen(true)} disabled={!detail.experiments.length}>
-            Nouveau plan
-          </Button>
+          canWrite ? (
+            <Button variant="primary" icon={Plus} onClick={() => setOpen(true)} disabled={!detail.experiments.length}>
+              Nouveau plan
+            </Button>
+          ) : undefined
         }
       >
         {detail.hpo_plans.length ? (
@@ -531,9 +563,11 @@ function HpoTab({ detail }: { detail: ProjectDetail }) {
                   : "Créez d'abord une expérience : un plan HPO s'appuie toujours sur une expérience de base."
               }
               action={
-                <Button variant="primary" icon={Plus} onClick={() => setOpen(true)} disabled={!detail.experiments.length}>
-                  Nouveau plan
-                </Button>
+                canWrite ? (
+                  <Button variant="primary" icon={Plus} onClick={() => setOpen(true)} disabled={!detail.experiments.length}>
+                    Nouveau plan
+                  </Button>
+                ) : undefined
               }
             />
           </Card>
@@ -548,7 +582,7 @@ function HpoTab({ detail }: { detail: ProjectDetail }) {
           <StudiesTable studies={studies.data ?? []} loading={studies.isLoading} empty="Aucune étude lancée pour ce projet." />
         )}
       </Section>
-      <NewHpoPlanDialog open={open} onClose={() => setOpen(false)} project={name} experiments={detail.experiments} plans={detail.hpo_plans} />
+      {canWrite && <NewHpoPlanDialog open={open} onClose={() => setOpen(false)} project={name} experiments={detail.experiments} plans={detail.hpo_plans} />}
     </div>
   );
 }
@@ -562,6 +596,7 @@ export default function ProjectPage() {
   const name = params.name ? decodeURIComponent(params.name) : "";
   const project = useProject(name);
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   const [search, setSearch] = useSearchParams();
   const [yamlOpen, setYamlOpen] = useState(false);
   const tabParam = search.get("tab") as TabId | null;
@@ -619,14 +654,16 @@ export default function ProjectPage() {
         title={s.title || s.name}
         description={s.description || undefined}
         actions={
-          <>
-            <Button icon={FileCode} onClick={() => setYamlOpen(true)}>
-              project.yaml
-            </Button>
-            <Button variant="primary" icon={Rocket} onClick={() => openLaunch({ project: s.name })}>
-              Nouveau lancement
-            </Button>
-          </>
+          canWrite ? (
+            <>
+              <Button icon={FileCode} onClick={() => setYamlOpen(true)}>
+                project.yaml
+              </Button>
+              <Button variant="primary" icon={Rocket} onClick={() => openLaunch({ project: s.name })}>
+                Nouveau lancement
+              </Button>
+            </>
+          ) : undefined
         }
         meta={
           <>
@@ -652,6 +689,7 @@ export default function ProjectPage() {
       {tab === "runs" && <RunsTab detail={detail} />}
       {tab === "hpo" && <HpoTab detail={detail} />}
       {tab === "leaderboard" && <LeaderboardView project={s} />}
+      {canWrite && (
       <YamlFileDrawer
         open={yamlOpen}
         onClose={() => setYamlOpen(false)}
@@ -660,6 +698,7 @@ export default function ProjectPage() {
         title="Réglages du projet"
         description="Titre, modalité, taille du message, benchmark par défaut et objectifs (axes du front de Pareto)."
       />
+      )}
     </Page>
   );
 }

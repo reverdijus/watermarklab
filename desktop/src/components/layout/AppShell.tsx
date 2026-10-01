@@ -6,7 +6,7 @@ import { Sidebar } from "./Sidebar";
 import { IconButton } from "../ui";
 import { useLaunch } from "../launch/LaunchProvider";
 import { useHotkey, useLocalStorage } from "../../lib/hooks";
-import { useHealth } from "../../lib/queries";
+import { useHealth, usePermissions } from "../../lib/queries";
 
 /**
  * Window layout: sidebar + scrollable content, draggable title strip for the
@@ -22,6 +22,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const location = useLocation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const health = useHealth();
+  const { canWrite } = usePermissions();
 
   useEffect(() => setReady(true), []);
   useHotkey("mod+\\", () => setCollapsed((c) => !c));
@@ -47,7 +48,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           {collapsed && (
             <>
               <IconButton icon={PanelLeftOpen} label="Afficher la barre latérale (⌘\)" size="sm" onClick={() => setCollapsed(false)} />
-              <IconButton icon={Plus} label="Nouveau lancement (⌘N)" size="sm" onClick={() => openLaunch()} />
+              {canWrite && <IconButton icon={Plus} label="Nouveau lancement (⌘N)" size="sm" onClick={() => openLaunch()} />}
             </>
           )}
           {offline && (

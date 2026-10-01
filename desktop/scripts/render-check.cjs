@@ -3,19 +3,27 @@
  * Headless rendering check of the built frontend against a running backend.
  *
  *   npx electron scripts/render-check.cjs [--base http://127.0.0.1:8799] [--token test]
- *                                         [--dark] [--launch] [--dialog] [--login] [--hosts]
- *                                         [--routes /,/runs] [--width 1000] [--height 640]
+ *                                         [--dark] [--launch] [--dialog] [--login] [--member]
+ *                                         [--users] [--hosts] [--routes /,/runs]
+ *                                         [--email E --password P] [--width 1000] [--height 640]
  *
  * For every route, an invisible offscreen BrowserWindow (1360×880 by default;
- * `--width 1000` checks the minimum window width, captures get a `_w1000` suffix) loads
- * `<base>/?token=<token>#<route>`, waits ~2.5 s, records console errors /
+ * `--width 1000` checks the minimum window width, captures get a `_w1000` suffix) stores the
+ * token in the page's localStorage (`wmlab.token`, as the login screen does — the app never
+ * reads `?token=`), loads `<base>/#<route>`, waits ~2.5 s, records console errors /
  * warnings and uncaught exceptions, and saves a PNG in desktop/.selftest/.
  * `--dark` renders a second pass with `data-theme="dark"` on key routes.
  * `--launch` opens the launch dialog, captures it, submits a local smoke
  * training and checks that the run page appears. `--dialog` only opens and captures the
- * dialog (no job: usable against scripts/mock-api.cjs). `--login` captures the login screen
- * (§12.6) without a token, then with a refused token. `--hosts` exercises the Machines page
- * (§12.4): inventory panel, retrieve job, decommission dialog (against the mock).
+ * dialog (no job: usable against scripts/mock-api.cjs). `--login` exercises the login screen
+ * (§12.6): form without a session, wrong password, pending account, registration form,
+ * e-mail + password login (`--email` / `--password`, default: the mock's admin), forced
+ * password change and refused session — the steps that create or modify an account only run
+ * against the mock. `--member` logs in as a member (`--member-email`, default
+ * marie@example.com) and checks the read-only interface on key routes (no write button, no
+ * code, no 403). `--users` exercises Réglages → Utilisateurs (create an account, temporary
+ * password, approval; mock only). `--hosts` exercises the Machines page (§12.4): inventory
+ * panel, retrieve job, decommission dialog (against the mock).
  *
  * Exit code: 0 when no error was recorded, 1 otherwise. A JSON report is
  * written to desktop/.selftest/report.json.
@@ -38,6 +46,11 @@ const flag = (name) => args.includes(name);
 
 const BASE = (process.env.WMLAB_API_BASE || opt("--base", "http://127.0.0.1:8799")).replace(/\/+$/, "");
 const TOKEN = process.env.WMLAB_API_TOKEN || opt("--token", "test");
+// Accounts of scripts/mock-api.cjs (all with the same demo password).
+const LOGIN_EMAIL = opt("--email", "justin@example.com");
+const LOGIN_PASSWORD = opt("--password", "motdepasse-demo-123");
+const MEMBER_EMAIL = opt("--member-email", "marie@example.com");
+const MEMBER_PASSWORD = opt("--member-password", "motdepasse-demo-123");
 const OUT_DIR = path.resolve(__dirname, "..", ".selftest");
 const SETTLE_MS = Number(opt("--settle", "2500"));
 const WIDTH = Number(opt("--width", "1360"));
@@ -144,15 +157,28 @@ const EXCEPTION_HOOK = `
     window.addEventListener('unhandledrejection', (e) => window.__wmlabErrors.push('unhandledrejection: ' + (e.reason && (e.reason.stack || e.reason.message) || String(e.reason))));
   })();`;
 
-async function load(win, route, { dark = false } = {}) {
+/**
+ * Store the session as the login screen does (localStorage of the backend origin). The
+ * public `/api/health` JSON page gives access to that origin without booting the app.
+ * `token` null: no session at all.
+ */
+async function primeSession(win, token) {
+  await win.loadURL(`${BASE}/api/health`);
+  await win.webContents.executeJavaScript(
+    `(() => { try { localStorage.removeItem('wmlab.apiBase'); ${token ? `localStorage.setItem('wmlab.token', ${JSON.stringify(token)});` : "localStorage.removeItem('wmlab.token');"} } catch {} })()`,
+    true,
+  );
+}
+
+async function load(win, route, { dark = false, token = TOKEN } = {}) {
   currentLabel = `${dark ? "dark" : "light"} ${route}`;
   const theme = dark ? "dark" : "light";
   // Both the OS preference (prefers-color-scheme) and the app override are forced,
   // so the pass does not depend on the Mac's current appearance.
   nativeTheme.themeSource = theme;
   await win.loadURL("about:blank");
-  const url = `${BASE}/?token=${encodeURIComponent(TOKEN)}#${route}`;
-  await win.loadURL(url);
+  await primeSession(win, token);
+  await win.loadURL(`${BASE}/#${route}`);
   await win.webContents.executeJavaScript(EXCEPTION_HOOK, true);
   await win.webContents.executeJavaScript(
     `document.documentElement.setAttribute('data-theme', ${JSON.stringify(theme)}); try { localStorage.setItem('wmlab.theme', ${JSON.stringify(theme)}); } catch {}`,
@@ -211,40 +237,291 @@ async function dialogScenario(win, captured) {
   await collectPageErrors(win);
 }
 
-/**
- * Login screen (§12.6): the page loaded without a token must show the token form (and no
- * app shell); a refused token must bring the form back with an explanation.
- */
-async function loginScenario(win, captured) {
-  currentLabel = "login (sans jeton)";
+/** Set the value of the input labelled `label` (React-controlled: native setter + input event). */
+const FILL = (label, value, scope = "document") => `
+  (() => {
+    const root = ${scope};
+    const lab = [...root.querySelectorAll('label')].find((l) => l.textContent.trim() === ${JSON.stringify(label)});
+    const el = lab && (lab.htmlFor ? document.getElementById(lab.htmlFor) : lab.querySelector('input'));
+    if (!el) return false;
+    const proto = el.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)});
+    el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
+    return true;
+  })()`;
+
+/** Fill several labelled fields; records an issue for a missing one. */
+async function fillForm(win, fields, scope) {
+  for (const [label, value] of Object.entries(fields)) {
+    const ok = await win.webContents.executeJavaScript(FILL(label, value, scope), true);
+    if (!ok) issues.push({ route: currentLabel, level: "error", text: `champ « ${label} » introuvable` });
+  }
+}
+
+/** Click the submit button of the (first) form whose text matches. */
+const SUBMIT = (text) => `
+  (() => {
+    const b = [...document.querySelectorAll('form button[type="submit"]')].find((e) => (e.innerText || '').trim() === ${JSON.stringify(text)});
+    if (!b) return false;
+    b.click();
+    return true;
+  })()`;
+
+/** Wait until the page text matches `re` (or the timeout); resolves the last text. */
+async function waitText(win, re, timeoutMs = 6000) {
+  let text = "";
+  for (let t = 0; t < timeoutMs; t += 250) {
+    text = await pageText(win).catch(() => "");
+    if (re.test(text)) return text;
+    await sleep(250);
+  }
+  return text;
+}
+
+const expectText = (text, expected, what) => {
+  for (const e of expected) if (!text.includes(e)) issues.push({ route: currentLabel, level: "error", text: `${what} : « ${e} » absent` });
+};
+
+/** Load the app without a session (login screen expected). */
+async function loadLoggedOut(win, token = null) {
   nativeTheme.themeSource = "light";
   await win.loadURL("about:blank");
-  // Same origin as the app: forget any token memorised by the previous routes.
-  await win.loadURL(`${BASE}/#/`);
-  await win.webContents.executeJavaScript("try { localStorage.removeItem('wmlab.token'); localStorage.removeItem('wmlab.apiBase'); sessionStorage.clear(); } catch {}", true);
-  await win.loadURL("about:blank");
+  await primeSession(win, token);
   await win.loadURL(`${BASE}/#/`);
   await win.webContents.executeJavaScript(EXCEPTION_HOOK, true);
   await win.webContents.executeJavaScript("document.documentElement.setAttribute('data-theme', 'light')", true);
   await sleep(SETTLE_MS);
-  let text = await pageText(win);
-  for (const expected of ["Jeton", "Se connecter"]) {
-    if (!text.includes(expected)) issues.push({ route: currentLabel, level: "error", text: `écran de connexion : « ${expected} » absent` });
+}
+
+/** Log in through the form; resolves the session token stored by the app (or null). */
+async function loginThroughForm(win, email, password) {
+  await fillForm(win, { "E-mail": email, "Mot de passe": password });
+  if (!(await win.webContents.executeJavaScript(SUBMIT("Se connecter"), true))) {
+    issues.push({ route: currentLabel, level: "error", text: "bouton « Se connecter » introuvable" });
+    return null;
   }
+  for (let i = 0; i < 40; i++) {
+    await sleep(250);
+    const token = await win.webContents.executeJavaScript("(() => { try { return localStorage.getItem('wmlab.token'); } catch { return null; } })()", true);
+    if (token) return token;
+  }
+  return null;
+}
+
+/**
+ * Login screen (§12.6): form without a session, wrong password, pending account, registration,
+ * e-mail + password login, forced password change (mock) and refused session.
+ */
+async function loginScenario(win, captured, { mock }) {
+  if (mock) await api("POST", "/mock/reset").catch(() => undefined);
+
+  currentLabel = "login (sans session)";
+  await loadLoggedOut(win);
+  let text = await pageText(win);
+  expectText(text, ["E-mail", "Mot de passe", "Se connecter", "Créer un compte"], "écran de connexion");
+  if (/Jeton/.test(text)) issues.push({ route: currentLabel, level: "error", text: "l'écran de connexion parle encore de « jeton »" });
   captured.push(await capture(win, "login"));
   await collectPageErrors(win, { expectReady: false });
 
-  currentLabel = "login (jeton refusé)";
-  await win.loadURL("about:blank");
-  await win.loadURL(`${BASE}/?token=refuse-moi#/`);
-  await win.webContents.executeJavaScript(EXCEPTION_HOOK, true);
+  currentLabel = "login (mot de passe faux)";
+  await fillForm(win, { "E-mail": LOGIN_EMAIL, "Mot de passe": "pas-le-bon-mot-de-passe" });
+  await win.webContents.executeJavaScript(SUBMIT("Se connecter"), true);
+  text = await waitText(win, /incorrect|refus|invalide/i);
+  if (!/incorrect|refus|invalide/i.test(text)) issues.push({ route: currentLabel, level: "error", text: "mot de passe faux : aucun message d'erreur" });
+  captured.push(await capture(win, "login wrong password"));
+
+  if (mock) {
+    currentLabel = "login (compte en attente)";
+    await fillForm(win, { "E-mail": "paul@example.com", "Mot de passe": LOGIN_PASSWORD });
+    await win.webContents.executeJavaScript(SUBMIT("Se connecter"), true);
+    text = await waitText(win, /attente/i);
+    if (!/attente/i.test(text)) issues.push({ route: currentLabel, level: "error", text: "compte en attente : message 403 absent" });
+  }
+
+  currentLabel = "register (formulaire)";
+  await win.webContents.executeJavaScript(CLICK_TEXT("button", "Créer un compte"), true);
+  await sleep(400);
+  text = await pageText(win);
+  expectText(text, ["Identifiant", "E-mail", "Mot de passe", "Confirmation", "Demander un compte"], "formulaire d'inscription");
+  if (mock) {
+    // Local validation first (12 characters minimum), then a real request.
+    await fillForm(win, { Identifiant: "zoe", "E-mail": "zoe@example.com", "Mot de passe": "court", Confirmation: "court" });
+    await win.webContents.executeJavaScript(SUBMIT("Demander un compte"), true);
+    await sleep(300);
+    text = await pageText(win);
+    if (!text.includes("au moins 12 caractères")) issues.push({ route: currentLabel, level: "error", text: "validation locale du mot de passe absente" });
+    await fillForm(win, { "Mot de passe": "une phrase de passe assez longue", Confirmation: "une phrase de passe assez longue" });
+    captured.push(await capture(win, "register"));
+    await win.webContents.executeJavaScript(SUBMIT("Demander un compte"), true);
+    text = await waitText(win, /Demande enregistrée/);
+    if (!text.includes("un administrateur doit approuver votre compte")) issues.push({ route: currentLabel, level: "error", text: "message « Demande enregistrée » absent" });
+    captured.push(await capture(win, "register done"));
+  } else {
+    captured.push(await capture(win, "register"));
+  }
+  await collectPageErrors(win, { expectReady: false });
+
+  currentLabel = "login (e-mail + mot de passe)";
+  await loadLoggedOut(win);
+  const token = await loginThroughForm(win, LOGIN_EMAIL, LOGIN_PASSWORD);
+  if (!token) issues.push({ route: currentLabel, level: "error", text: `connexion de ${LOGIN_EMAIL} impossible (aucune session mémorisée)` });
+  else if (mock && !token.startsWith("wmls_")) issues.push({ route: currentLabel, level: "error", text: `jeton de session inattendu : ${token.slice(0, 8)}…` });
   await sleep(SETTLE_MS);
   text = await pageText(win);
-  if (!/refus/i.test(text)) issues.push({ route: currentLabel, level: "error", text: "jeton refusé : aucune explication affichée" });
+  if (mock && !text.includes("justin")) issues.push({ route: currentLabel, level: "error", text: "nom de l'utilisateur connecté absent de la barre latérale" });
+  captured.push(await capture(win, "login ok"));
+  await collectPageErrors(win);
+
+  if (mock) {
+    currentLabel = "login (mot de passe temporaire)";
+    await loadLoggedOut(win);
+    await loginThroughForm(win, "nina@example.com", LOGIN_PASSWORD);
+    text = await waitText(win, /Définir un nouveau mot de passe/);
+    if (!text.includes("Définir un nouveau mot de passe")) issues.push({ route: currentLabel, level: "error", text: "écran « Définir un nouveau mot de passe » absent" });
+    captured.push(await capture(win, "login must change password"));
+    await fillForm(win, { "Mot de passe actuel": LOGIN_PASSWORD, "Nouveau mot de passe": "nouvelle phrase de passe 42", Confirmation: "nouvelle phrase de passe 42" });
+    await win.webContents.executeJavaScript(SUBMIT("Enregistrer le mot de passe"), true);
+    let ready = false;
+    for (let i = 0; i < 24 && !ready; i++) {
+      await sleep(250);
+      ready = await win.webContents.executeJavaScript("Boolean(document.querySelector('[data-app-ready]'))", true).catch(() => false);
+    }
+    if (!ready) issues.push({ route: currentLabel, level: "error", text: "l'application ne s'ouvre pas après le changement de mot de passe" });
+    await collectPageErrors(win);
+  }
+
+  currentLabel = "login (session refusée)";
+  await loadLoggedOut(win, "wmls_session_inconnue");
+  text = await pageText(win);
+  if (!/expiré|révoqué/i.test(text)) issues.push({ route: currentLabel, level: "error", text: "session refusée : aucune explication affichée" });
   captured.push(await capture(win, "login refused"));
   await collectPageErrors(win, { expectReady: false });
-  // Leave the origin clean for a following pass.
-  await win.webContents.executeJavaScript("try { localStorage.removeItem('wmlab.token'); } catch {}", true);
+  if (mock) {
+    // Registration closed (hosted.allow_registration = false): no « Créer un compte » link.
+    currentLabel = "login (inscription fermée)";
+    const settings = await api("GET", "/settings");
+    await api("PUT", "/settings", { ...settings, hosted: { ...settings.hosted, allow_registration: false } });
+    await loadLoggedOut(win);
+    text = await pageText(win);
+    if (text.includes("Créer un compte")) issues.push({ route: currentLabel, level: "error", text: "lien « Créer un compte » affiché alors que l'inscription est fermée" });
+    await collectPageErrors(win, { expectReady: false });
+  }
+  // Leave the origin clean for a following pass; restore the mock's accounts and settings.
+  await primeSession(win, null);
+  if (mock) await api("POST", "/mock/reset").catch(() => undefined);
+}
+
+/**
+ * Member (§12.6): logs in through the form, then checks the read-only interface — no write
+ * button, no code (YAML, logs, registries), Réglages reduced — and that no route answers 403
+ * (a 403 would show up as a console error).
+ */
+async function memberScenario(win, captured) {
+  currentLabel = "member login";
+  await loadLoggedOut(win);
+  const token = await loginThroughForm(win, MEMBER_EMAIL, MEMBER_PASSWORD);
+  if (!token) {
+    issues.push({ route: currentLabel, level: "error", text: `connexion de ${MEMBER_EMAIL} impossible` });
+    return;
+  }
+  // Redacted payloads (§9): no params, no plan, errors cut to their last line.
+  const runs = await fetch(`${BASE}/api/runs?include_trials=true`, { headers: { "X-WMLab-Token": token } }).then((r) => r.json()).catch(() => []);
+  if (!Array.isArray(runs) || !runs.length) issues.push({ route: currentLabel, level: "error", text: "GET /api/runs (membre) : aucune donnée" });
+  for (const r of Array.isArray(runs) ? runs : []) {
+    if (r.params && Object.keys(r.params).length) issues.push({ route: currentLabel, level: "error", text: `run ${r.run_id} : params non expurgés pour un membre` });
+    if (typeof r.error === "string" && r.error.includes("\n")) issues.push({ route: currentLabel, level: "error", text: `run ${r.run_id} : traceback complète envoyée à un membre` });
+  }
+  const failed = (Array.isArray(runs) ? runs : []).find((r) => r.error);
+  if (failed) {
+    const detail = await fetch(`${BASE}/api/runs/${encodeURIComponent(failed.run_id)}`, { headers: { "X-WMLab-Token": token } }).then((r) => r.json()).catch(() => null);
+    if (!detail || detail.plan !== null) issues.push({ route: currentLabel, level: "error", text: `run ${failed.run_id} : plan non expurgé pour un membre` });
+    await load(win, `/runs/${encodeURIComponent(failed.run_id)}`, { token });
+    currentLabel = `member /runs/${failed.run_id}`;
+    const text = await pageText(win);
+    if (/Traceback|\bDétails\b/.test(text)) issues.push({ route: currentLabel, level: "error", text: "traceback ou bouton « Détails » affiché à un membre" });
+    if (!text.includes(failed.error)) issues.push({ route: currentLabel, level: "error", text: "dernière ligne de l'erreur absente" });
+    await collectPageErrors(win);
+    captured.push(await capture(win, "member failed run"));
+  }
+  const forbidden = ["Nouveau lancement", "Bibliothèque", "Nouvelle expérience", "Nouveau plan", "Ajouter une machine", "Modifier le YAML", "Voir le YAML", "Arrêter", "Brancher"];
+  const checks = {
+    "/": { absent: forbidden },
+    "/runs/{run}": { absent: [...forbidden, "Évaluer", "Logs", "Curriculum", "Plan de phases indisponible"], present: ["Configuration", "Notes"] },
+    "/runs/{run}?tab=config": { present: ["Configuration réservée aux administrateurs"], absent: ["Paramètres", "Overrides"] },
+    "/compare?runs={run},{run2}": { present: ["Contexte"], absent: ["Paramètres"] },
+    "/runs/{run}?tab=logs": { absent: ["Logs"] },
+    "/runs/{run}?tab=notes": { absent: ["Enregistrer"] },
+    "/runs/{run}?tab=env": { present: ["Réservé aux administrateurs"] },
+    "/projects/image-hidden?tab=experiments": { absent: [...forbidden, "Dupliquer", "Lancer"] },
+    "/projects/image-hidden?tab=hpo": { absent: [...forbidden, "Lancer"] },
+    "/projects/image-hidden/experiments/baseline": { present: ["Réservé aux administrateurs"] },
+    "/projects/image-hidden/hpo/lr_weights": { present: ["Réservé aux administrateurs"] },
+    "/studies/{study}": { absent: [...forbidden, "Relancer", "Ouvrir le plan"] },
+    "/studies/{study}?tab=notes": { absent: ["Enregistrer"] },
+    "/library": { present: ["Réservé aux administrateurs"] },
+    "/hosts": { absent: [...forbidden, "Tester la connexion", "Rapatrier les checkpoints", "Retirer la machine"] },
+    "/datasets": { absent: [...forbidden, "Nouveau dataset"] },
+    "/benchmarks": { absent: [...forbidden, "Nouvelle version"] },
+    "/budget": { absent: ["Ajouter la dépense"], present: ["Entrées manuelles"] },
+    "/leaderboard": { absent: forbidden },
+    "/settings": { present: ["Mon compte", "Connexion", "membre"], absent: ["Utilisateurs", "Workspace", "Mode hébergé"] },
+  };
+  for (const route of await resolveRoutes(Object.keys(checks))) {
+    const key = Object.keys(checks).find((k) => route === k || (k.includes("{") && new RegExp(`^${k.replace(/[?]/g, "\\?").replace(/\{run2?\}|\{study\}/g, "[^/?,]+")}$`).test(route)));
+    const spec = checks[key] || {};
+    await load(win, route, { token });
+    currentLabel = `member ${route}`;
+    const text = await pageText(win);
+    for (const word of spec.absent || []) {
+      const re = new RegExp(`(^|\\n)\\s*${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*($|\\n)`);
+      if (re.test(text)) issues.push({ route: currentLabel, level: "error", text: `lecture seule : « ${word} » affiché` });
+    }
+    for (const word of spec.present || []) if (!text.includes(word)) issues.push({ route: currentLabel, level: "error", text: `« ${word} » absent` });
+    await collectPageErrors(win);
+    captured.push(await capture(win, `member ${route}`));
+  }
+  await primeSession(win, null);
+}
+
+/** Réglages → Utilisateurs (admin, mock only): create an account (temporary password), approve a registration. */
+async function usersScenario(win, captured) {
+  await api("POST", "/mock/reset").catch(() => undefined);
+  await load(win, "/settings");
+  currentLabel = "users table";
+  let text = await pageText(win);
+  expectText(text, ["Utilisateurs", "paul@example.com", "en attente", "Approuver", "Créer un compte", "Inscription ouverte"], "réglages (admin)");
+  await win.webContents.executeJavaScript(
+    "(() => { const h = [...document.querySelectorAll('main div')].find((d) => d.textContent.trim() === 'Utilisateurs'); if (h) h.scrollIntoView({ block: 'start' }); })()",
+    true,
+  );
+  await sleep(300);
+  captured.push(await capture(win, "users table"));
+  await collectPageErrors(win);
+
+  currentLabel = "users create";
+  await win.webContents.executeJavaScript(CLICK_TEXT("button", "Créer un compte"), true);
+  await sleep(400);
+  await fillForm(win, { "E-mail": "lucie@example.com", Identifiant: "lucie" }, "document.querySelector('[role=\"dialog\"]')");
+  await win.webContents.executeJavaScript(CLICK_TEXT('[role="dialog"] button', "Créer le compte"), true);
+  text = await waitText(win, /Affiché une seule fois/);
+  expectText(text, ["Compte créé", "Affiché une seule fois", "lucie@example.com"], "mot de passe temporaire");
+  const pwd = await win.webContents.executeJavaScript("(document.querySelector('[data-temporary-password]')?.textContent || '').trim()", true);
+  if (pwd.length < 12) issues.push({ route: currentLabel, level: "error", text: `mot de passe temporaire non affiché (${pwd.length} caractères)` });
+  captured.push(await capture(win, "users temporary password"));
+  await win.webContents.executeJavaScript(CLICK_TEXT('[role="dialog"] button', "J'ai noté le mot de passe"), true);
+  await sleep(400);
+
+  currentLabel = "users approve";
+  await win.webContents.executeJavaScript(CLICK_TEXT("button", "Approuver"), true);
+  await sleep(400);
+  text = await pageText(win);
+  expectText(text, ["Approuver paul", "Rôle"], "dialogue d'approbation");
+  captured.push(await capture(win, "users approve dialog"));
+  await win.webContents.executeJavaScript(CLICK_TEXT('[role="dialog"] button', "Approuver"), true);
+  text = await waitText(win, /Compte approuvé/);
+  if (!text.includes("Compte approuvé")) issues.push({ route: currentLabel, level: "error", text: "toast « Compte approuvé » absent" });
+  await collectPageErrors(win);
+  await api("POST", "/mock/reset").catch(() => undefined);
 }
 
 /** Click a button by text inside the host card whose title is `host`. */
@@ -388,9 +665,11 @@ app.whenReady().then(async () => {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const captured = [];
   let routes;
+  let mock = false;
   try {
     const health = await api("GET", "/health");
-    process.stderr.write(`[render-check] backend ${BASE} ok (${health.workspace})\n`);
+    mock = /mock/.test(String(health.version));
+    process.stderr.write(`[render-check] backend ${BASE} ok (${health.workspace})${mock ? " — backend factice" : ""}\n`);
     const wanted = opt("--routes", null);
     routes = await resolveRoutes(wanted ? wanted.split(",") : DEFAULT_ROUTES);
   } catch (err) {
@@ -427,9 +706,19 @@ app.whenReady().then(async () => {
       await hostsScenario(win, captured);
       process.stderr.write("[render-check] page Machines exercée\n");
     }
+    if (flag("--users")) {
+      if (mock) {
+        await usersScenario(win, captured);
+        process.stderr.write("[render-check] réglages → utilisateurs exercés\n");
+      } else process.stderr.write("[render-check] --users ignoré : réservé au backend factice (modifie des comptes)\n");
+    }
+    if (flag("--member")) {
+      await memberScenario(win, captured);
+      process.stderr.write("[render-check] interface membre (lecture seule) vérifiée\n");
+    }
     if (flag("--login")) {
-      await loginScenario(win, captured);
-      process.stderr.write("[render-check] écran de connexion capturé\n");
+      await loginScenario(win, captured, { mock });
+      process.stderr.write("[render-check] écran de connexion exercé\n");
     }
   } catch (err) {
     issues.push({ route: currentLabel, level: "error", text: `script: ${err && err.stack ? err.stack : err}` });

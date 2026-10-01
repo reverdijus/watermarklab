@@ -139,7 +139,9 @@ JOB = {"job_id": str, "kind": Enum("train", "hpo", "eval", "setup", "retrieve"),
        "git_ref": (str, None), "git_sha": (str, None), "retrieval": (RETRIEVAL, None),
        "result": ({"runs": int, "studies": int, "checkpoints": int, "bytes": int,
                    "missing": [str]}, None)}
-ME = {"name": str, "role": Enum("admin", "member"), "hosted": bool, "public_url": (str, None)}
+ME = {"id": str, "name": str, "email": str, "role": Enum("admin", "member"), "hosted": bool,
+      "public_url": (str, None), "must_change_password": bool,
+      "auth": Enum("session", "server_token")}
 GIT_STATE = {"available": bool, "hosted": bool, "branch": (str, None), "sha": (str, None),
              "short_sha": (str, None), "dirty": bool, "remote": (str, None),
              "ahead": (int, None), "behind": (int, None), "last_pull_at": (str, None),
@@ -167,7 +169,8 @@ SETTINGS = {"name": str,
                                            "project": (str, None)}]},
             "data_dir": str, "sync_interval_s": Num, "default_host": str,
             "hosted": {"enabled": bool, "git_branch": str, "auto_pull_s": int,
-                       "auto_commit": bool, "public_url": (str, None)}}
+                       "auto_commit": bool, "public_url": (str, None),
+                       "allow_registration": bool}}
 OVERVIEW = {"workspace": {"name": str, "path": str},
             "budget": {"total_eur": Num, "spent_eur": Num, "remaining_eur": Num,
                        "running_eur_per_hour": Num},
@@ -421,7 +424,7 @@ def test_engine_artifacts(data: Data) -> None:
 # -- every GET route of §9 ----------------------------------------------------------------------
 def test_health_and_auth(client: TestClient, data: Data) -> None:
     health = get(client, "/api/health")
-    check(health, {"ok": bool, "version": str, "workspace": str})
+    check(health, {"ok": bool, "version": str, "hosted": bool, "registration": bool, "workspace": str})
     assert health["ok"] is True and health["workspace"] == str(data.root)
     assert client.get("/api/overview", headers={"X-WMLab-Token": ""}).status_code == 401
 
@@ -648,9 +651,13 @@ def test_hosted_routes(client: TestClient, data: Data) -> None:
     non-hosted) workspace."""
     me = get(client, "/api/me")
     check(me, ME)
-    assert me == {"name": "admin", "role": "admin", "hosted": False, "public_url": None}
+    assert me == {"id": "", "name": "admin", "email": "", "role": "admin", "hosted": False,
+                  "public_url": None, "must_change_password": False, "auth": "server_token"}
     users = get(client, "/api/users")
-    check(users, [{"name": str, "role": str, "created_at": str, "revoked_at": (str, None)}])
+    check(users, [{"id": str, "name": str, "email": str, "role": str, "status": str,
+                   "must_change_password": bool, "created_at": str, "approved_at": (str, None),
+                   "approved_by": (str, None), "disabled_at": (str, None),
+                   "last_login_at": (str, None)}])
     git = get(client, "/api/git")
     check(git, GIT_STATE)
     assert git["available"] is False and git["hosted"] is False

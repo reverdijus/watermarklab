@@ -252,21 +252,31 @@ Contrat : `ARCHITECTURE.md` §12 ; guide d'installation et d'exploitation :
 ```
 
 - **Installation** : `sudo bash deploy/install_server.sh --repo <url> --branch main --dir
-  /opt/wmlab --domain lab.example.com --admin <nom>` sur Ubuntu 24.04 (idempotent) : uv,
-  Node 22, clone, `uv sync`, build du frontend, service systemd, Caddy (HTTPS automatique),
-  sauvegardes quotidiennes, premier utilisateur admin, `workspace.yaml` en mode hébergé.
-- **Utilisateurs et jetons** : un jeton par personne (`wmlab users add NAME [--role
-  admin|member]`, affiché une seule fois ; `users list`, `users revoke`). Les runs, études et
-  jobs portent leur auteur (`user`) ; filtre « mes runs ». Rôle `member` : tout sauf machines,
-  réglages, retrait et utilisateurs.
+  /opt/wmlab --domain lab.example.com --admin <nom> --admin-email <e-mail>` sur Ubuntu 24.04
+  (idempotent) : uv, Node 22, clone, `uv sync`, build du frontend, service systemd durci,
+  Caddy (HTTPS automatique, en-têtes de sécurité), sauvegardes quotidiennes, premier compte
+  admin (mot de passe temporaire affiché une seule fois, à changer à la première connexion),
+  `workspace.yaml` en mode hébergé.
+- **Comptes** : chacun se connecte avec **son e-mail et son mot de passe** (plus de jeton
+  personnel). Inscription depuis l'écran de connexion (« Créer un compte ») → compte **en
+  attente** → approuvé par un admin (Réglages → Utilisateurs, ou `wmlab users approve EMAIL`) ;
+  ou création directe par un admin (`wmlab users add EMAIL --name NAME [--role admin|member]`,
+  mot de passe temporaire affiché une seule fois). Mot de passe oublié : un admin lance
+  `wmlab users reset-password EMAIL`. Les runs, études et jobs portent leur auteur (`user` =
+  nom du compte) ; filtre « mes runs ».
+- **Rôles** : `admin` = tout (lancements, édition des YAML, machines, réglages, comptes) ;
+  `member` = **lecture seule** (runs, études, classement, budget, machines) **sans accès au code
+  d'entraînement ni aux architectures** (`lab/`, `wmlab/`, specs YAML, registres, journaux).
 - **Connexion** : app de bureau, menu **Serveur → Se connecter à un serveur distant…** (URL +
-  jeton ; retour au backend local par le même menu) ; ou navigateur sur
-  `https://lab.example.com/`.
+  e-mail + mot de passe ; l'app ne garde qu'un jeton de session de 30 jours ; retour au backend
+  local par le même menu) ; ou navigateur sur `https://lab.example.com/` (même écran de
+  connexion). Le jeton serveur (`WMLAB_TOKEN`) n'est qu'un secours admin en ligne de commande.
 - **Flux de travail** : éditer **localement** (poste du membre, mode local inchangé) →
   `wmlab validate` / `wmlab train --smoke` → **commit + push** → dans l'app connectée au
-  serveur, « Nouveau lancement » avec la **révision git** (branche ou sha) : le serveur
-  exporte ce commit exact vers la machine GPU. Les modifications non poussées ne sont pas
-  prises en compte. Un YAML enregistré depuis l'app est commité et poussé par le serveur.
+  serveur avec un compte **admin**, « Nouveau lancement » avec la **révision git** (branche ou
+  sha) : le serveur exporte ce commit exact vers la machine GPU. Les modifications non poussées
+  ne sont pas prises en compte. Un YAML enregistré depuis l'app est commité et poussé par le
+  serveur.
 - **Machines GPU** : la clé SSH du serveur (générée à l'installation) est déposée dans les
   clés du projet Scaleway ; cycle : créer → **Préparer** → lancer → **Rapatrier les
   checkpoints** → **Retirer la machine** (refuse tant que tout n'est pas rapatrié) →
@@ -311,9 +321,14 @@ wmlab new hpo PROJECT NAME --experiment EXP
 wmlab runs list [--project P] [--status S] [--include-trials] [--limit 100] [--json]   # sans --include-trials : runs d'essais HPO exclus
 wmlab runs show RUN [--json]      # manifest + summary + checkpoints + evals (RUN : id, fragment unique ou dossier)
 wmlab index                       # reconstruit l'index SQLite de l'app
-wmlab users add NAME [--role admin|member]   # mode équipe : crée un utilisateur, affiche son jeton UNE fois
-wmlab users list [--json]         # utilisateurs (rôle, création, révocation) ; « admin » = jeton serveur, nom réservé
-wmlab users revoke NAME           # révoque le jeton (401 immédiat)
+wmlab users add EMAIL --name NAME [--role admin|member] [--password-stdin]   # mode équipe (serveur) : compte actif,
+                                  # mot de passe temporaire affiché UNE fois (à changer à la 1re connexion)
+wmlab users list [--json]         # comptes : e-mail, nom, rôle, état, dernière connexion (« admin » : nom réservé au jeton serveur)
+wmlab users approve EMAIL [--role admin|member]   # approuve une inscription en attente (member par défaut)
+wmlab users role EMAIL ROLE       # change le rôle (refusé pour soi-même et pour le dernier admin)
+wmlab users disable EMAIL         # désactive le compte et révoque ses sessions (401 immédiat)
+wmlab users enable EMAIL          # réactive un compte désactivé
+wmlab users reset-password EMAIL  # mot de passe oublié : temporaire affiché UNE fois, sessions révoquées
 wmlab weights list [--json]       # poids officiels des baselines : source, licence, présence sur cette machine
 wmlab weights pull NAME... [--force]   # télécharge des poids officiels (.wmlab/weights/)
 ```
@@ -399,6 +414,13 @@ quand la demande s'y prête (dans ce dossier).
 - **`wmlab-analyse`** : analyser runs et études (courbes, benchmark, utilisation GPU),
   diagnostiquer, écrire la conclusion dans le `notes.md` du run et proposer la suite avec
   son coût face au budget.
+- **`/check`** (à taper dans Claude Code) : lance `validate`, `pytest`, le build et les tests
+  du desktop et le dry-run de `deploy/`, puis rapporte les échecs.
+
+Le dépôt fournit aussi des agents spécialisés (`.claude/agents/`, chacun avec le modèle adapté
+à sa tâche), des hooks qui empêchent d'écrire sous `.wmlab/` ou de modifier un benchmark publié
+et relancent `wmlab validate` après l'édition d'un YAML, et des règles chargées par dossier
+(`.claude/rules/`) ; voir `CLAUDE.md` § Outillage Claude.
 
 Exemples de demandes :
 
@@ -449,7 +471,8 @@ Tout ce qui est produit vit dans **`.wmlab/`** à la racine du workspace (régla
 | `.wmlab/runs/<run_id>/` | runs (locaux et rapatriés) : `run.json`, `metrics.jsonl`, `checkpoints/`, `samples/`, `eval/`, `notes.md` | **oui** (source de vérité) |
 | `.wmlab/studies/<study_id>/` | études HPO (`optuna.journal`, `trials.jsonl`) | **oui** |
 | `.wmlab/hosts.yaml` | machines (avec `decommissioned_at` pour l'historique) | oui (petit) |
-| `.wmlab/users.yaml` | mode équipe : utilisateurs et empreintes des jetons (serveur) | oui (petit) |
+| `.wmlab/users.yaml` | mode équipe (serveur) : comptes (e-mail, nom, rôle, état, mot de passe haché scrypt), mode 0600 | oui (petit) |
+| `.wmlab/sessions.json` | mode équipe (serveur) : sessions de connexion (empreintes SHA-256 des jetons, expiration), mode 0600 | facultatif (sans lui, chacun se reconnecte) |
 | `.wmlab/jobs/` | suivi des lancements de l'app | facultatif |
 | `.wmlab/index.sqlite` | index de l'app | non (reconstruit : `wmlab index`) |
 | `.wmlab/weights/` | poids officiels des baselines (plusieurs Go) | non (`wmlab weights pull`) |
@@ -479,12 +502,16 @@ sont décrites dans `deploy/README.md` §8 (Object Storage via rclone, ou archiv
   d'import des plugins.
 - **`401` ou « jeton requis » sur l'API** : le serveur a toujours un jeton — `--token`,
   sinon la variable `WMLAB_TOKEN`, sinon un jeton aléatoire affiché **une fois** sur stderr
-  au démarrage (à passer en `X-WMLab-Token` ou `?token=`). Hors loopback (`--host`), un
+  au démarrage (à passer dans l'en-tête `X-WMLab-Token`). Hors loopback (`--host`), un
   jeton explicite est obligatoire. L'app packagée génère le sien et le transmet au backend
   par `WMLAB_TOKEN` (jamais sur la ligne de commande).
-- **`401` sur le serveur central** : jeton personnel mal copié ou **révoqué**
-  (`wmlab users list` sur le serveur) ; **`403`** : action réservée aux admins (machines,
-  réglages, retrait, utilisateurs). Détails : `deploy/README.md` §10.
+- **`401` sur le serveur central** : e-mail ou mot de passe incorrect à la connexion (mot de
+  passe oublié : un admin lance `wmlab users reset-password EMAIL`), ou session expirée
+  (30 jours) / révoquée (déconnexion, changement de mot de passe, compte désactivé) : se
+  reconnecter. **`403`** : compte **en attente** d'approbation (`wmlab users approve EMAIL`),
+  compte **désactivé** (`wmlab users enable EMAIL`), ou action réservée aux admins (un
+  `member` est en lecture seule). **`429`** : trop de tentatives de connexion, attendre.
+  Détails : `deploy/README.md` §10.
 - **Run « perdu » (lost)** : plus de heartbeat depuis 10 min (machine éteinte, process tué,
   synchronisation coupée) ; voir la page Machines et le `stdout.log` du run.
 - **Connexion SSH impossible** depuis l'app alors que `ssh <alias>` marche : l'app utilise

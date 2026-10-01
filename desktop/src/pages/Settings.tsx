@@ -6,6 +6,7 @@ import {
   GitBranch,
   Globe,
   Info,
+  KeyRound,
   Keyboard,
   Laptop,
   LogOut,
@@ -15,7 +16,7 @@ import {
   Save,
   Server,
   Sun,
-  Users,
+  UserRound,
   Wallet,
 } from "lucide-react";
 import {
@@ -24,7 +25,6 @@ import {
   Callout,
   Card,
   CardHeader,
-  CodeBlock,
   IconButton,
   Input,
   Kbd,
@@ -34,17 +34,19 @@ import {
   Segmented,
   Select,
   Skeleton,
-  Table,
+  Switch,
   copyText,
   useToast,
-  type Column,
 } from "../components/ui";
+import { PasswordChangeForm } from "../components/account/PasswordChangeForm";
+import { UsersCard } from "../components/account/UsersCard";
 import { useSession } from "../components/LoginGate";
 import { errorMessage, getApiConfig } from "../lib/api";
+import { ROLE_LABELS } from "../lib/auth";
 import { formatDate, formatEur, formatRelative } from "../lib/format";
-import { errorStatus, useGit, useGitPull, useHealth, useHosts, useMe, useOverview, useSaveSettings, useSettings, useUsers } from "../lib/queries";
+import { errorStatus, useGit, useGitPull, useHealth, useHosts, useMe, useOverview, usePermissions, useSaveSettings, useSettings } from "../lib/queries";
 import { useThemePreference, type ThemePreference } from "../lib/theme";
-import type { UserInfo, WorkspaceSettings } from "../lib/types";
+import type { Me, WorkspaceSettings } from "../lib/types";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -73,6 +75,9 @@ function WorkspaceForm({ settings }: { settings: WorkspaceSettings }) {
   const [end, setEnd] = useState(settings.budget.end ?? "");
   const [sync, setSync] = useState(String(settings.sync_interval_s));
   const [defaultHost, setDefaultHost] = useState(settings.default_host);
+  // §12.1 — only offered when the backend reports the field (older backends reject unknown keys).
+  const hasRegistration = typeof settings.hosted?.allow_registration === "boolean";
+  const [allowRegistration, setAllowRegistration] = useState(settings.hosted?.allow_registration ?? true);
   const [error, setError] = useState<string | null>(null);
 
   const dirty =
@@ -81,7 +86,8 @@ function WorkspaceForm({ settings }: { settings: WorkspaceSettings }) {
     start !== (settings.budget.start ?? "") ||
     end !== (settings.budget.end ?? "") ||
     sync !== String(settings.sync_interval_s) ||
-    defaultHost !== settings.default_host;
+    defaultHost !== settings.default_host ||
+    (hasRegistration && allowRegistration !== settings.hosted?.allow_registration);
 
   const submit = async () => {
     const totalEur = Number(total.replace(",", ".").replace(/\s/g, ""));
@@ -99,6 +105,7 @@ function WorkspaceForm({ settings }: { settings: WorkspaceSettings }) {
         budget: { ...settings.budget, total_eur: totalEur, start: start || null, end: end || null },
         sync_interval_s: syncS,
         default_host: defaultHost,
+        ...(hasRegistration && settings.hosted ? { hosted: { ...settings.hosted, allow_registration: allowRegistration } } : {}),
       });
       toast.success("Réglages enregistrés");
     } catch (err) {
@@ -153,6 +160,7 @@ function WorkspaceForm({ settings }: { settings: WorkspaceSettings }) {
           <Input label="Fin de période" type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
         </div>
       </Card>
+      <HostedCard registration={hasRegistration ? { value: allowRegistration, onChange: setAllowRegistration } : null} />
       {error && (
         <Callout tone="danger" icon={CircleAlert}>
           {error}
@@ -168,8 +176,11 @@ function WorkspaceForm({ settings }: { settings: WorkspaceSettings }) {
   );
 }
 
-/** §12.3 — server checkout: branch, sha, last pull, "Tirer maintenant", public URL. */
-function HostedCard() {
+/**
+ * §12.1 / §12.3 — server checkout (branch, sha, last pull, "Tirer maintenant"), public URL and
+ * self-registration switch (`hosted.allow_registration`, saved with the settings form).
+ */
+function HostedCard({ registration = null }: { registration?: { value: boolean; onChange: (v: boolean) => void } | null }) {
   const git = useGit();
   const me = useMe();
   const settings = useSettings();
@@ -207,6 +218,19 @@ function HostedCard() {
           ) : undefined
         }
       />
+      {registration && (
+        <Switch
+          className="mb-4 border-b border-border pb-4"
+          checked={registration.value}
+          onChange={registration.onChange}
+          label="Inscription ouverte"
+          description={
+            registration.value
+              ? "Toute personne qui connaît l'adresse du serveur peut demander un compte ; il reste en attente jusqu'à l'approbation d'un administrateur."
+              : "Seuls les administrateurs créent des comptes (Réglages → Utilisateurs) ; le lien « Créer un compte » est masqué."
+          }
+        />
+      )}
       {git.isLoading ? (
         <Skeleton lines={4} />
       ) : unavailable ? (
@@ -253,54 +277,47 @@ function HostedCard() {
   );
 }
 
-/** §12.2 — users (admin): list + reminder of the CLI command. */
-function UsersCard() {
-  const me = useMe();
-  const isAdmin = me.data?.role === "admin";
-  const users = useUsers(!!me.data && isAdmin);
-  const columns: Column<UserInfo>[] = [
-    { id: "name", header: "Nom", cell: (u) => <span className={u.revoked_at ? "text-muted line-through" : "font-medium text-fg"}>{u.name}</span>, sortValue: (u) => u.name },
-    {
-      id: "role",
-      header: "Rôle",
-      width: 110,
-      cell: (u) => <Badge tone={u.role === "admin" ? "accent" : "neutral"}>{u.role === "admin" ? "administrateur" : "membre"}</Badge>,
-      sortValue: (u) => u.role,
-    },
-    { id: "created", header: "Créé", align: "right", cell: (u) => <span className="whitespace-nowrap text-muted">{formatDate(u.created_at)}</span>, sortValue: (u) => u.created_at },
-    {
-      id: "status",
-      header: "État",
-      align: "right",
-      width: 120,
-      cell: (u) => (u.revoked_at ? <span className="whitespace-nowrap text-danger">révoqué {formatRelative(u.revoked_at)}</span> : <span className="text-success">actif</span>),
-      sortValue: (u) => (u.revoked_at ? 1 : 0),
-    },
-  ];
-  if (!me.data) return null;
+/** §12.2 — « Mon compte »: identity, role and password change (sessions only, not the server token). */
+function AccountCard({ me }: { me: Me }) {
+  const toast = useToast();
+  const [changing, setChanging] = useState(false);
   return (
     <Card>
       <CardHeader
-        title="Utilisateurs"
-        icon={Users}
-        description={isAdmin ? "Jetons personnels de l'équipe (.wmlab/users.yaml) ; seul leur empreinte est stockée." : "Réservé aux administrateurs."}
+        title="Mon compte"
+        icon={UserRound}
+        actions={
+          !changing ? (
+            <Button size="sm" icon={KeyRound} onClick={() => setChanging(true)}>
+              Changer le mot de passe
+            </Button>
+          ) : undefined
+        }
       />
-      {isAdmin ? (
-        <>
-          {users.isError ? (
-            <Callout tone="danger" icon={CircleAlert}>
-              {errorStatus(users.error) === 404 ? "Le backend ne gère pas encore les utilisateurs (version antérieure au mode hébergé)." : errorMessage(users.error)}
-            </Callout>
-          ) : (
-            <Table columns={columns} rows={users.data ?? []} rowKey={(u) => u.name} loading={users.isLoading} dense empty="Aucun utilisateur : seul le jeton du serveur est accepté." initialSort={{ id: "name", desc: false }} />
-          )}
-          <div className="mt-4 text-[12.5px] text-muted">Ajouter un membre (sur le serveur ; le jeton n'est affiché qu'une fois) :</div>
-          <CodeBlock code={"wmlab users add <nom> [--role admin|member]\nwmlab users list\nwmlab users revoke <nom>"} className="mt-2" />
-        </>
-      ) : (
-        <div className="text-[13px] text-muted">
-          Connecté en tant que <span className="font-medium text-fg">{me.data.name}</span> (membre). Demandez à un administrateur pour ajouter ou révoquer des
-          jetons.
+      <KeyValue
+        dense
+        items={[
+          { label: "Identifiant", value: me.name, mono: true },
+          { label: "E-mail", value: me.email || "—" },
+          { label: "Rôle", value: <Badge tone={me.role === "admin" ? "accent" : "neutral"}>{ROLE_LABELS[me.role] ?? me.role}</Badge> },
+          ...(me.role === "member"
+            ? [{ label: "Accès", value: "lecture seule : runs, études, classement, budget, machines" }]
+            : []),
+        ]}
+      />
+      {changing && (
+        <div className="mt-4 border-t border-border pt-4">
+          <PasswordChangeForm
+            me={me}
+            autoFocus
+            onChanged={() => {
+              setChanging(false);
+              toast.success("Mot de passe modifié", "Vos autres sessions ont été déconnectées.");
+            }}
+          />
+          <Button size="sm" variant="ghost" className="mt-2" onClick={() => setChanging(false)}>
+            Annuler
+          </Button>
         </div>
       )}
     </Card>
@@ -344,7 +361,11 @@ function ConnectionCard() {
           { label: "Backend wmlab", value: health.data?.version ?? (health.isError ? "injoignable" : "—"), mono: true },
           {
             label: "Utilisateur",
-            value: me.data ? `${me.data.name} · ${me.data.role === "admin" ? "administrateur" : "membre"}` : me.isError ? "inconnu" : "—",
+            value: me.data
+              ? `${me.data.name} · ${ROLE_LABELS[me.data.role] ?? me.data.role}${me.data.auth === "server_token" ? " (jeton du serveur)" : ""}`
+              : me.isError
+                ? "inconnu"
+                : "—",
           },
           ...(me.data?.public_url ? [{ label: "URL publique", value: me.data.public_url, mono: true }] : []),
         ]}
@@ -361,67 +382,108 @@ function ConnectionCard() {
           )}
         </div>
       )}
-      {!electron && me.data?.public_url && (
-        <div className="mt-3 inline-flex items-center gap-1.5 text-[12.5px] text-muted">
-          <Globe size={13} strokeWidth={1.75} aria-hidden /> Partagez {me.data.public_url} avec l'équipe : chaque membre se connecte avec son jeton.
+      {!electron && me.data?.public_url && me.data.role === "admin" && (
+        <div className="mt-3 flex items-start gap-1.5 text-[12.5px] text-muted">
+          <Globe size={13} strokeWidth={1.75} className="mt-0.5 shrink-0" aria-hidden />
+          <span>
+            Partagez {me.data.public_url} avec l'équipe : chacun demande un compte (ou reçoit un mot de passe temporaire) puis se connecte avec son
+            e-mail.
+          </span>
         </div>
       )}
     </Card>
   );
 }
 
+function AppearanceCard() {
+  const [theme, setTheme] = useThemePreference();
+  return (
+    <Card>
+      <CardHeader title="Apparence" description="Préférence propre à cet ordinateur." />
+      <Segmented<ThemePreference>
+        size="md"
+        value={theme}
+        onChange={setTheme}
+        options={[
+          { value: "system", label: "Système", icon: Monitor },
+          { value: "light", label: "Clair", icon: Sun },
+          { value: "dark", label: "Sombre", icon: Moon },
+        ]}
+      />
+    </Card>
+  );
+}
+
+/** Member (read-only, §12.6): « Mon compte », « Connexion » and the local appearance only. */
+function MemberSettings({ me }: { me: Me | null }) {
+  return (
+    <Page>
+      <PageHeader title="Réglages" description="Votre compte, la connexion au serveur de l'équipe et l'apparence." />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
+        <div className="space-y-4 lg:col-span-3">
+          {me && me.auth !== "server_token" ? (
+            <AccountCard me={me} />
+          ) : (
+            <Callout tone="info" icon={UserRound}>
+              Compte inconnu : le serveur n'a pas renvoyé l'utilisateur connecté.
+            </Callout>
+          )}
+        </div>
+        <div className="space-y-4 lg:col-span-2">
+          <ConnectionCard />
+          <AppearanceCard />
+        </div>
+      </div>
+    </Page>
+  );
+}
+
 export default function Settings() {
-  const settings = useSettings();
+  const perms = usePermissions();
+  const me = useMe();
+  const settings = useSettings({ enabled: perms.isAdmin });
   const overview = useOverview();
   const health = useHealth();
-  const [theme, setTheme] = useThemePreference();
   const config = getApiConfig();
 
+  if (!perms.isAdmin) return <MemberSettings me={me.data ?? null} />;
+
+  const account = me.data && me.data.auth !== "server_token" ? me.data : null;
   const workspacePath = overview.data?.workspace.path ?? health.data?.workspace ?? null;
   const dataDir = settings.data?.data_dir ?? null;
   const dataPath = dataDir && workspacePath && !dataDir.startsWith("/") && !dataDir.startsWith("~") ? `${workspacePath.replace(/\/+$/, "")}/${dataDir}` : dataDir;
 
   return (
     <Page>
-      <PageHeader title="Réglages" description="Workspace, budget, mode hébergé, utilisateurs, connexion et apparence." />
+      <PageHeader title="Réglages" description="Workspace, budget, mode hébergé, comptes de l'équipe, connexion et apparence." />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <div className="space-y-4 lg:col-span-3">
           {settings.isError ? (
-            <Callout
-              tone="danger"
-              icon={CircleAlert}
-              title="Impossible de charger les réglages"
-              action={
-                <Button size="sm" onClick={() => void settings.refetch()}>
-                  Réessayer
-                </Button>
-              }
-            >
-              {errorMessage(settings.error)}
-            </Callout>
+            <>
+              <Callout
+                tone="danger"
+                icon={CircleAlert}
+                title="Impossible de charger les réglages"
+                action={
+                  <Button size="sm" onClick={() => void settings.refetch()}>
+                    Réessayer
+                  </Button>
+                }
+              >
+                {errorMessage(settings.error)}
+              </Callout>
+              <HostedCard />
+            </>
           ) : settings.data ? (
             <WorkspaceForm key={JSON.stringify(settings.data)} settings={settings.data} />
           ) : (
             <Skeleton className="h-96 rounded-xl" />
           )}
-          <HostedCard />
-          <UsersCard />
         </div>
         <div className="space-y-4 lg:col-span-2">
+          {account && <AccountCard me={account} />}
           <ConnectionCard />
-          <Card>
-            <CardHeader title="Apparence" description="Préférence propre à cet ordinateur." />
-            <Segmented<ThemePreference>
-              size="md"
-              value={theme}
-              onChange={setTheme}
-              options={[
-                { value: "system", label: "Système", icon: Monitor },
-                { value: "light", label: "Clair", icon: Sun },
-                { value: "dark", label: "Sombre", icon: Moon },
-              ]}
-            />
-          </Card>
+          <AppearanceCard />
           <Card>
             <CardHeader title="Chemins" icon={FolderOpen} />
             <PathRow label="Workspace" value={workspacePath} />
@@ -454,6 +516,9 @@ export default function Settings() {
             </ul>
           </Card>
         </div>
+      </div>
+      <div className="mt-6">
+        <UsersCard meId={me.data?.id || null} />
       </div>
     </Page>
   );

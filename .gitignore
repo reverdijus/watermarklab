@@ -12,6 +12,9 @@ desktop/dist/
 desktop/release/
 desktop/resources/workspace.json
 desktop/.selftest/
+# Secrets locaux (jamais dans le dépôt)
+.env
+.env.*
 # Divers
 .DS_Store
 *.pt

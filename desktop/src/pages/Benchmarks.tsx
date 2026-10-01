@@ -25,7 +25,7 @@ import { api, errorMessage } from "../lib/api";
 import { formatInt, formatSignificant, plural } from "../lib/format";
 import { metricLabel } from "../lib/metrics";
 import { toastFileSaved } from "../components/saveToast";
-import { useBenchmarks, useLeaderboard, useSaveFile } from "../lib/queries";
+import { useBenchmarks, useLeaderboard, usePermissions, useSaveFile } from "../lib/queries";
 import { MODALITY_LABELS } from "../lib/runs";
 import type { BenchmarkInfo, Modality } from "../lib/types";
 
@@ -44,6 +44,7 @@ function BenchmarkCard({
   onDuplicate: () => void;
 }) {
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   return (
     <Card className="flex flex-col">
       <div className="flex items-start justify-between gap-3">
@@ -98,6 +99,7 @@ function BenchmarkCard({
         </div>
       </div>
 
+      {canWrite && (
       <div className="mt-auto flex flex-wrap gap-2 pt-4">
         <Button size="sm" icon={FileCode} onClick={onView}>
           Voir le YAML
@@ -109,6 +111,7 @@ function BenchmarkCard({
           Évaluer
         </Button>
       </div>
+      )}
     </Card>
   );
 }
@@ -202,6 +205,7 @@ function NewVersionDialog({
 
 export default function Benchmarks() {
   const benchmarks = useBenchmarks();
+  const { canWrite } = usePermissions();
   const [modality, setModality] = useState<ModalityFilter>("all");
   const [editing, setEditing] = useState<{ path: string; locked: boolean } | null>(null);
   const [duplicating, setDuplicating] = useState<BenchmarkInfo | null>(null);
@@ -229,10 +233,12 @@ export default function Benchmarks() {
         title="Benchmarks"
         description="Suites d'évaluation figées et versionnées : mêmes données, mêmes attaques, mêmes seuils — des résultats comparables dans le temps."
       />
-      <Callout tone="warning" icon={Lock} title="Une version publiée ne se modifie pas" className="mb-6">
-        Les évaluations déjà enregistrées ne seraient plus comparables entre elles. Pour changer de données, d'attaques ou de métriques,
-        créez une nouvelle version (ex. image_v1 → image_v2) puis éditez-la.
-      </Callout>
+      {canWrite && (
+        <Callout tone="warning" icon={Lock} title="Une version publiée ne se modifie pas" className="mb-6">
+          Les évaluations déjà enregistrées ne seraient plus comparables entre elles. Pour changer de données, d'attaques ou de métriques,
+          créez une nouvelle version (ex. image_v1 → image_v2) puis éditez-la.
+        </Callout>
+      )}
 
       <div className="mb-5 flex items-center gap-3">
         <Segmented<ModalityFilter>
@@ -290,7 +296,7 @@ export default function Benchmarks() {
         </Card>
       )}
 
-      {duplicating && (
+      {canWrite && duplicating && (
         <NewVersionDialog
           source={duplicating}
           existing={names}
@@ -298,6 +304,7 @@ export default function Benchmarks() {
           onCreated={(path) => setEditing({ path, locked: false })}
         />
       )}
+      {canWrite && (
       <YamlFileDrawer
         open={!!editing}
         onClose={() => setEditing(null)}
@@ -326,6 +333,7 @@ export default function Benchmarks() {
           ) : undefined
         }
       />
+      )}
     </Page>
   );
 }

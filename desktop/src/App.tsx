@@ -2,6 +2,7 @@ import { Component, lazy, Suspense, type ErrorInfo, type ReactNode } from "react
 import { HashRouter, Route, Routes, useLocation } from "react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { CircleAlert, Compass } from "lucide-react";
+import { RequireCode } from "./components/AdminOnly";
 import { AppShell } from "./components/layout/AppShell";
 import { LaunchProvider } from "./components/launch/LaunchProvider";
 import { LoginGate } from "./components/LoginGate";
@@ -79,14 +80,35 @@ function AppRoutes() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/projects/:name" element={<ProjectPage />} />
-          <Route path="/projects/:name/experiments/:exp" element={<ExperimentEditor />} />
-          <Route path="/projects/:name/hpo/:plan" element={<HpoPlanEditor />} />
+          <Route
+            path="/projects/:name/experiments/:exp"
+            element={
+              <RequireCode what="Les spécifications d'expérience (YAML) ne sont visibles que par les administrateurs. Les métadonnées des expériences restent listées sur la page du projet.">
+                <ExperimentEditor />
+              </RequireCode>
+            }
+          />
+          <Route
+            path="/projects/:name/hpo/:plan"
+            element={
+              <RequireCode what="Les plans d'optimisation (YAML) ne sont visibles que par les administrateurs. Les plans et leurs études restent listés sur la page du projet.">
+                <HpoPlanEditor />
+              </RequireCode>
+            }
+          />
           <Route path="/runs" element={<RunsList />} />
           <Route path="/runs/:id" element={<RunDetail />} />
           <Route path="/studies/:id" element={<StudyDetail />} />
           <Route path="/compare" element={<Compare />} />
           <Route path="/leaderboard" element={<Leaderboard />} />
-          <Route path="/library" element={<Library />} />
+          <Route
+            path="/library"
+            element={
+              <RequireCode what="La bibliothèque des composants (architectures, attaques, pertes…) décrit le code d'entraînement : elle est réservée aux administrateurs.">
+                <Library />
+              </RequireCode>
+            }
+          />
           <Route path="/datasets" element={<Datasets />} />
           <Route path="/benchmarks" element={<Benchmarks />} />
           <Route path="/hosts" element={<Hosts />} />

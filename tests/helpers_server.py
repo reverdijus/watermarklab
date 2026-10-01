@@ -78,7 +78,8 @@ COST_ITEM_KEYS = {"kind", "id", "project", "host", "started_at", "hours", "eur"}
 COSTS_KEYS = {"total_eur", "spent_eur", "remaining_eur", "running_eur_per_hour", "by_project",
               "by_host", "by_month", "items", "budget"}
 SETTINGS_KEYS = {"name", "budget", "data_dir", "sync_interval_s", "default_host", "hosted"}
-HOSTED_KEYS = {"enabled", "git_branch", "auto_pull_s", "auto_commit", "public_url"}
+HOSTED_KEYS = {"enabled", "git_branch", "auto_pull_s", "auto_commit", "public_url",
+               "allow_registration"}
 GIT_STATE_KEYS = {"available", "hosted", "branch", "sha", "short_sha", "dirty", "remote", "ahead",
                   "behind", "last_pull_at", "last_pull_error"}
 INVENTORY_KEYS = {"host", "reachable", "error", "checked_at", "active_jobs", "remote_data_dir",
@@ -402,8 +403,15 @@ def job_status_of(client: Any, job_id: str) -> dict[str, Any]:
     return next(j for j in client.get("/api/jobs").json() if j["job_id"] == job_id)
 
 
-def add_user_token(ws: Path, name: str, role: str = "member") -> str:
-    """Create a user in ``<ws>/.wmlab/users.yaml``; return its token."""
-    from wmlab.users import add_user, users_path
+PASSWORD = "mot-de-passe-de-test-123"
 
-    return add_user(name, role, users_path(ws / ".wmlab"))[1]
+
+def add_user_session(ws: Path, name: str, role: str = "member", *, email: str | None = None,
+                     password: str = PASSWORD) -> str:
+    """Create an active account in ``<ws>/.wmlab/users.yaml`` and open a session; return
+    the session token (``wmls_…``) to send in ``X-WMLab-Token``."""
+    from wmlab.users import UserStore
+
+    store = UserStore(ws / ".wmlab")
+    user, _ = store.add(email or f"{name}@example.com", name, role, password=password, by="test")
+    return store.open_session(user, "127.0.0.1")[1]

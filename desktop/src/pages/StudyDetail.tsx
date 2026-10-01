@@ -49,7 +49,7 @@ import { ApiError, errorMessage } from "../lib/api";
 import { formatDate, formatDuration, formatEur, formatHours, formatInt, formatPercent, formatRelative, formatSignificant, plural, secondsBetween, shortId } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { formatMetric, formatMetricAxis, metricLabel, parseConstraint, type Constraint } from "../lib/metrics";
-import { useCancelJob, useJobs, useSetStudyNotes, useStudy } from "../lib/queries";
+import { useCancelJob, useJobs, usePermissions, useSetStudyNotes, useStudy } from "../lib/queries";
 import { experimentPath, hpoPlanPath, isActiveStatus, projectPath, runPath } from "../lib/runs";
 import type { Direction, Objective, StudyDetail as StudyData, Trial } from "../lib/types";
 
@@ -173,6 +173,7 @@ function IntermediateChart({ trials, objective, bestTrials }: { trials: Trial[];
 
 function StudyHeader({ study }: { study: StudyData }) {
   const { openLaunch } = useLaunch();
+  const { canWrite, canViewCode } = usePermissions();
   const jobs = useJobs();
   const cancel = useCancelJob();
   const confirm = useConfirm();
@@ -208,9 +209,13 @@ function StudyHeader({ study }: { study: StudyData }) {
             {study.project}
           </Link>
           <span className="text-faint">/</span>
-          <Link to={hpoPlanPath(study.project, study.plan)} className="no-drag hover:text-fg">
-            plan {study.plan}
-          </Link>
+          {canViewCode ? (
+            <Link to={hpoPlanPath(study.project, study.plan)} className="no-drag hover:text-fg">
+              plan {study.plan}
+            </Link>
+          ) : (
+            <span>plan {study.plan}</span>
+          )}
         </span>
       }
       title={
@@ -225,19 +230,21 @@ function StudyHeader({ study }: { study: StudyData }) {
         </span>
       }
       actions={
-        <>
-          {job && (
-            <Button variant="danger" icon={Square} onClick={() => void stop()} loading={cancel.isPending}>
-              Arrêter
+        canWrite ? (
+          <>
+            {job && (
+              <Button variant="danger" icon={Square} onClick={() => void stop()} loading={cancel.isPending}>
+                Arrêter
+              </Button>
+            )}
+            <Button icon={FileCode} to={hpoPlanPath(study.project, study.plan)}>
+              Ouvrir le plan
             </Button>
-          )}
-          <Button icon={FileCode} to={hpoPlanPath(study.project, study.plan)}>
-            Ouvrir le plan
-          </Button>
-          <Button icon={RotateCw} onClick={() => openLaunch({ kind: "hpo", project: study.project, plan: study.plan, host: study.host })}>
-            Relancer
-          </Button>
-        </>
+            <Button icon={RotateCw} onClick={() => openLaunch({ kind: "hpo", project: study.project, plan: study.plan, host: study.host })}>
+              Relancer
+            </Button>
+          </>
+        ) : undefined
       }
       meta={
         <>
@@ -250,9 +257,15 @@ function StudyHeader({ study }: { study: StudyData }) {
               {study.study_id}
             </button>
           </Tooltip>
-          <Link to={experimentPath(study.project, study.experiment)} className="no-drag inline-flex items-center gap-1.5 hover:text-fg">
-            <FlaskConical size={13} strokeWidth={1.75} aria-hidden /> {study.experiment}
-          </Link>
+          {canViewCode ? (
+            <Link to={experimentPath(study.project, study.experiment)} className="no-drag inline-flex items-center gap-1.5 hover:text-fg">
+              <FlaskConical size={13} strokeWidth={1.75} aria-hidden /> {study.experiment}
+            </Link>
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              <FlaskConical size={13} strokeWidth={1.75} aria-hidden /> {study.experiment}
+            </span>
+          )}
           <span className="inline-flex items-center gap-1.5">
             <Cpu size={13} strokeWidth={1.75} aria-hidden /> {study.host}
           </span>
@@ -268,8 +281,10 @@ function StudyHeader({ study }: { study: StudyData }) {
 
 function StudyNotesTab({ study }: { study: StudyData }) {
   const save = useSetStudyNotes(study.study_id);
+  const { canWrite } = usePermissions();
   return (
     <NotesEditor
+      readOnly={!canWrite}
       draftKey={`study-notes:${study.study_id}`}
       notes={study.notes ?? ""}
       save={(notes) => save.mutateAsync(notes)}

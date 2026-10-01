@@ -82,8 +82,12 @@ def terminate_group(pid: int) -> None:
 class LocalExecutor(Executor):
     """Runs jobs as detached subprocesses (``start_new_session=True``)."""
 
+    SECRET_VARS = ("WMLAB_TOKEN", "SCW_SECRET_KEY")
+
     def environment(self) -> dict[str, str]:
-        env = dict(os.environ)
+        """Environment of a job: the server secrets never reach the training process (which
+        imports user plugins)."""
+        env = {k: v for k, v in os.environ.items() if k not in self.SECRET_VARS}
         env.update({
             "WMLAB_WORKSPACE": str(self.ctx.workspace),
             "WMLAB_DATA": str(self.ctx.data),

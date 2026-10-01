@@ -79,12 +79,24 @@ class ServerContext:
         return self.workspace / WORKSPACE_FILE
 
     def settings(self) -> WorkspaceSettings:
-        """Load ``workspace.yaml`` (defaults if missing or invalid)."""
+        """Load ``workspace.yaml``.
+
+        Defaults when the file is missing. When the file exists but is invalid, the last
+        settings read successfully are kept (an edit mistake must not silently disable the
+        hosted mode or reopen registration); defaults only if none were ever read.
+        """
         try:
             if self.settings_path.is_file():
-                return load_yaml(self.settings_path, "workspace")
+                loaded = load_yaml(self.settings_path, "workspace")
+                self._last_settings = loaded
+                return loaded
         except Exception as exc:
-            log.warning("workspace.yaml invalide, valeurs par défaut utilisées : %s", exc)
+            last = getattr(self, "_last_settings", None)
+            log.error("workspace.yaml invalide (%s) : %s", exc,
+                      "derniers réglages valides conservés" if last is not None
+                      else "valeurs par défaut utilisées")
+            if last is not None:
+                return last
         return WorkspaceSettings()
 
     def hosts(self) -> list[HostSpec]:

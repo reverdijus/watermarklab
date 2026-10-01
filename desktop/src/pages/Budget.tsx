@@ -29,7 +29,7 @@ import { burnup, projectedSpend } from "../components/analysis";
 import { costsCsvUrl, errorMessage } from "../lib/api";
 import { formatDate, formatDay, formatEur, formatHours, formatMonth, formatPercent, plural, shortId, toDate } from "../lib/format";
 import { useNow } from "../lib/hooks";
-import { useCosts, useProjects, useSaveSettings, useSettings } from "../lib/queries";
+import { useCosts, usePermissions, useProjects, useSaveSettings, useSettings } from "../lib/queries";
 import { runPath, studyPath } from "../lib/runs";
 import type { CostItem, Costs, WorkspaceSettings } from "../lib/types";
 
@@ -218,6 +218,33 @@ function ManualEntries({ settings, projects }: { settings: WorkspaceSettings; pr
   );
 }
 
+/** Member (read-only, §12.6): manual entries as reported by `/api/costs` (settings are admin only). */
+function ManualEntriesReadOnly({ items }: { items: CostItem[] }) {
+  return (
+    <Card>
+      <CardHeader title="Entrées manuelles" icon={PiggyBank} description="Dépenses hors runs (stockage, instance oubliée, crédits…) saisies par un administrateur." />
+      {items.length ? (
+        <ul className="divide-y divide-border rounded-xl border border-border">
+          {items.map((e, i) => (
+            <li key={`${e.id}-${i}`} className="flex items-center gap-3 px-3 py-2 text-[13px]">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-fg">{e.label ?? e.id}</div>
+                <div className="text-[12px] text-muted">
+                  {formatDay(e.started_at)}
+                  {e.project ? ` · ${e.project}` : ""}
+                </div>
+              </div>
+              <span className="tabular shrink-0 text-fg">{formatEur(e.eur)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-[13px] text-muted">Aucune entrée manuelle.</p>
+      )}
+    </Card>
+  );
+}
+
 function itemLink(item: CostItem): string | null {
   if (item.kind === "run") return runPath(item.id);
   if (item.kind === "study") return studyPath(item.id);
@@ -227,7 +254,8 @@ function itemLink(item: CostItem): string | null {
 
 export default function Budget() {
   const costs = useCosts();
-  const settings = useSettings();
+  const { canWrite } = usePermissions();
+  const settings = useSettings({ enabled: canWrite });
   const projects = useProjects();
   const now = useNow(60000);
   const [kind, setKind] = useState<KindFilter>("all");
@@ -424,7 +452,7 @@ export default function Budget() {
                 icon={Wallet}
                 title="Aucune dépense enregistrée"
                 description="Les runs, études et évaluations apparaissent ici avec leur coût (durée × prix de la machine)."
-                action={<Button to="/hosts">Configurer les machines</Button>}
+                action={canWrite ? <Button to="/hosts">Configurer les machines</Button> : undefined}
               />
             </Card>
           ) : (
@@ -442,7 +470,13 @@ export default function Budget() {
           )}
         </Section>
         <div>
-          {settings.data ? (
+          {!canWrite ? (
+            data ? (
+              <ManualEntriesReadOnly items={data.items.filter((i) => i.kind === "manual")} />
+            ) : (
+              <Skeleton className="h-80 rounded-xl" />
+            )
+          ) : settings.data ? (
             <ManualEntries settings={settings.data} projects={(projects.data ?? []).map((p) => ({ value: p.name, label: p.title || p.name }))} />
           ) : settings.isError ? (
             <Callout tone="danger" icon={CircleAlert} title="Réglages indisponibles">

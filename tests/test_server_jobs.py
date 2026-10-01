@@ -314,13 +314,13 @@ def test_ssh_job_lifecycle(ws: Path, runner: FakeRunner):
     runner.alive = True
     client.post(f"/api/jobs/{job['job_id']}/sync")
     pull = runner.rsync_calls()[-1]  # while running: light sync (no .pt)
-    assert pull[:6] == ["rsync", "-az", "--exclude", "checkpoints/*.pt", "--exclude",
-                        "checkpoints/.*.tmp"]
+    assert pull[:7] == ["rsync", "-az", "--safe-links", "--exclude", "checkpoints/*.pt",
+                        "--exclude", "checkpoints/.*.tmp"]
     runner.alive = False
     synced = client.post(f"/api/jobs/{job['job_id']}/sync").json()
     assert synced["status"] == "completed" and synced["last_sync_at"]
     pull = runner.rsync_calls()[-1]  # end of job: full sync (*.pt included, §12.4)
-    assert pull[:4] == ["rsync", "-az", "--exclude", "checkpoints/.*.tmp"]
+    assert pull[:5] == ["rsync", "-az", "--safe-links", "--exclude", "checkpoints/.*.tmp"]
     assert "checkpoints/*.pt" not in pull
     assert pull[-2] == f"root@51.15.0.1:/root/wmlab-data/runs/{run_id}/"
     assert pull[-1] == f"{ws / '.wmlab' / 'runs' / run_id}/"

@@ -74,18 +74,22 @@ def test_health_and_no_token(client: TestClient, ws: Path):
 def test_token_required(ws: Path):
     client = TestClient(create_app(ws, TOKEN, background=False))
     public = client.get("/api/health")
-    assert public.status_code == 200 and public.json() == {"ok": True, "version": public.json()["version"]}
+    assert public.status_code == 200 and public.json() == {
+        "ok": True, "version": public.json()["version"], "hosted": False, "registration": True}
     assert "workspace" not in public.json()  # the workspace path is only shown to the app
     assert client.get("/api/health", headers={"X-WMLab-Token": TOKEN}).json()["workspace"] == str(ws)
     denied = client.get("/api/projects")
-    assert denied.status_code == 401 and "jeton" in denied.json()["detail"]
+    assert denied.status_code == 401 and "X-WMLab-Token" in denied.json()["detail"]
     assert client.get("/api/projects", headers={"X-WMLab-Token": "faux"}).status_code == 401
     # a non-ASCII token is refused (401), not a 500 from ``compare_digest``
     assert client.get("/api/projects",
                       headers={"X-WMLab-Token": "tést".encode("utf-8")}).status_code == 401
     assert client.get("/api/projects?token=%C3%A9").status_code == 401
     assert client.get("/api/projects", headers={"X-WMLab-Token": TOKEN}).status_code == 200
-    assert client.get(f"/api/runs/r1/logs?token={TOKEN}").status_code == 200
+    # ?token= is only read on the two download routes
+    assert client.get(f"/api/runs/r1/logs?token={TOKEN}").status_code == 401
+    assert client.get(f"/api/runs/r1/file?path=run.json&token={TOKEN}").status_code == 200
+    assert client.get(f"/api/costs.csv?token={TOKEN}").status_code == 200
     preflight = client.options("/api/projects", headers={
         "Origin": "http://localhost:5173", "Access-Control-Request-Method": "GET",
         "Access-Control-Request-Headers": "x-wmlab-token"})
@@ -99,7 +103,7 @@ def test_non_ascii_token_is_compared_as_bytes(ws: Path):
     client = TestClient(create_app(ws, "jeton-é", background=False))
     assert client.get("/api/projects",
                       headers={"X-WMLab-Token": "jeton-é".encode("utf-8")}).status_code == 200
-    assert client.get("/api/projects?token=jeton-%C3%A9").status_code == 200
+    assert client.get("/api/costs.csv?token=jeton-%C3%A9").status_code == 200
     assert client.get("/api/projects", headers={"X-WMLab-Token": "jeton-e"}).status_code == 401
 
 
@@ -112,7 +116,10 @@ def test_resolve_token(monkeypatch: pytest.MonkeyPatch):
     assert flag is True and len(generated) >= 32 and generated != resolve_token(None)[0]
     monkeypatch.setenv("WMLAB_TOKEN", "from-env")
     assert resolve_token(None) == ("from-env", False)
-    assert resolve_token("cli-wins", "0.0.0.0") == ("cli-wins", False)
+    assert resolve_token("cli-wins-but-long-enough", "0.0.0.0") == ("cli-wins-but-long-enough", False)
+    with pytest.raises(RuntimeError, match="16 caractères"):
+        resolve_token("cli-wins", "0.0.0.0")  # too short outside the loopback
+    assert resolve_token("cli-wins") == ("cli-wins", False)  # loopback: any explicit token
     monkeypatch.delenv("WMLAB_TOKEN")
     with pytest.raises(RuntimeError, match="jeton explicite"):
         resolve_token(None, "0.0.0.0")
@@ -130,6 +137,11 @@ def test_static_frontend(ws: Path):
     assert page.headers["cache-control"] == "no-cache"
     assert client.get("/index.html").headers["cache-control"] == "no-cache"
     assert "immutable" in client.get("/assets/index-abc123.js").headers["cache-control"]
+    # security headers on every page of the SPA (§12.7)
+    assert page.headers["content-security-policy"].startswith("default-src 'self'")
+    assert page.headers["x-frame-options"] == "DENY"
+    assert page.headers["x-content-type-options"] == "nosniff"
+    assert page.headers["referrer-policy"] == "no-referrer"
     assert client.get("/api/overview").status_code == 401
 
 

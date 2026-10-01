@@ -576,8 +576,12 @@ class JobManager:
         run_ids: list[str] = []
         try:
             listing = executor.listing()  # type: ignore[attr-defined]
-            run_ids = listing.run_ids
-            for study_id in sorted(listing.studies):
+            # identifiers come from the GPU: never a path component
+            run_ids = [r for r in listing.run_ids if SAFE_ID.match(r) and ".." not in r]
+            studies = [s for s in listing.studies if SAFE_ID.match(s) and ".." not in s]
+            if len(run_ids) != len(listing.run_ids) or len(studies) != len(listing.studies):
+                log.warning("inventaire de %s : identifiants invalides ignorés", job.host)
+            for study_id in sorted(studies):
                 if job.cancel_requested:
                     break
                 executor.pull("studies", study_id, full=True)  # type: ignore[attr-defined]

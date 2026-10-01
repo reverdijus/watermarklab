@@ -7,6 +7,7 @@ is stored: ``ssh`` uses ``~/.ssh/config`` and the user's keys (``BatchMode=yes``
 
 from __future__ import annotations
 
+import re
 import shlex
 import time
 from pathlib import Path
@@ -32,6 +33,7 @@ from wmlab.server.inventory import (
 from wmlab.tracking import read_json, read_jsonl
 
 log = logging.getLogger("wmlab.server")
+SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")  # ids coming from a GPU
 
 SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
 CODE_EXCLUDES = (".git", ".venv", ".wmlab", "desktop", "node_modules", "__pycache__")
@@ -192,7 +194,9 @@ class SshExecutor(Executor):
                 f"&& printf '%s' {digest} > {marker}; fi")
 
     def pull_argv(self, remote_dir: str, local_dir: Path, full: bool = False) -> list[str]:
-        argv = ["rsync", "-az"]
+        # --safe-links: a symlink made on the GPU that points outside the run folder (towards
+        # /etc/wmlab/env, the SSH key…) is never recreated on the server
+        argv = ["rsync", "-az", "--safe-links"]
         for pattern in FULL_PULL_EXCLUDES if full else PULL_EXCLUDES:
             argv += ["--exclude", pattern]
         if (local_dir / "notes.md").exists():
@@ -300,6 +304,8 @@ class SshExecutor(Executor):
 
         Partial transfers (rsync codes 23/24, e.g. folder not created yet) are tolerated.
         """
+        if kind not in ("runs", "studies") or not SAFE_ID.match(item_id) or ".." in item_id:
+            raise ValueError(f"identifiant distant refusé : {kind}/{item_id!r}")
         local = self.ctx.data / kind / item_id
         local.mkdir(parents=True, exist_ok=True)
         result = self.run(self.pull_argv(_join(self.data_dir, kind, item_id), local, full),
@@ -314,7 +320,8 @@ class SshExecutor(Executor):
             return [job.run_id], []
         if job.kind == "hpo" and job.study_id:
             trials = read_jsonl(self.ctx.data / "studies" / job.study_id / "trials.jsonl")
-            runs = list(dict.fromkeys(str(t["run_id"]) for t in trials if t.get("run_id")))
+            runs = list(dict.fromkeys(str(t["run_id"]) for t in trials
+                                      if t.get("run_id") and SAFE_ID.match(str(t["run_id"]))))
             return runs, [job.study_id]
         return [], []
 
@@ -367,18 +374,22 @@ class SshExecutor(Executor):
         elif job.kind == "hpo" and job.study_id:
             self.pull("studies", job.study_id)
             trials = read_jsonl(self.ctx.data / "studies" / job.study_id / "trials.jsonl")
-            for run_id in dict.fromkeys(str(t["run_id"]) for t in trials if t.get("run_id")):
+            for run_id in dict.fromkeys(str(t["run_id"]) for t in trials
+                                        if t.get("run_id") and SAFE_ID.match(str(t["run_id"]))):
                 manifest = read_json(self.ctx.data / "runs" / run_id / "run.json")
                 if isinstance(manifest, dict) and manifest.get("status") in FINAL_RUN_STATUSES:
                     continue  # finished trials are already complete locally
                 self.pull("runs", run_id)
 
     def fetch_checkpoint(self, run_id: str, file: str) -> None:
+        if not SAFE_ID.match(run_id) or ".." in run_id or not SAFE_ID.match(file) \
+                or ".." in file:
+            raise ValueError(f"identifiant refusé : {run_id!r}/{file!r}")
         local = self.ctx.data / "runs" / run_id / "checkpoints" / file
         local.parent.mkdir(parents=True, exist_ok=True)
         remote = _join(self.data_dir, "runs", run_id, "checkpoints", file)
-        self._check(self.run(["rsync", "-az", "-e", self.rsh(), self.remote_spec(remote),
-                              str(local)], timeout=TIMEOUT_SYNC_S),
+        self._check(self.run(["rsync", "-az", "--safe-links", "-e", self.rsh(),
+                              self.remote_spec(remote), str(local)], timeout=TIMEOUT_SYNC_S),
                     "Le rapatriement du checkpoint")
 
     def setup(self, job: JobRecord) -> CommandResult:

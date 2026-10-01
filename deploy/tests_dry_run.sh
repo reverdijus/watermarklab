@@ -5,8 +5,10 @@
 #   bash deploy/tests_dry_run.sh
 #
 # Vérifie : syntaxe bash (bash -n) de tous les scripts, sortie de install_server.sh en dry-run
-# (clonage d'un dossier vide, puis mise à jour du dépôt courant), refus des mauvaises options,
-# patch_workspace.py sur une copie de workspace.yaml, backup.sh en dry-run (mode local).
+# (clonage d'un dossier vide, puis mise à jour du dépôt courant), refus des mauvaises options
+# (dont --admin-email absent ou invalide), durcissement de l'unité systemd et en-têtes du
+# Caddyfile (simple grep : ni systemd ni caddy sur un Mac), patch_workspace.py sur une copie de
+# workspace.yaml, backup.sh en dry-run (mode local).
 # Code de retour 0 si tout passe. Aucun fichier du dépôt n'est modifié.
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -38,12 +40,14 @@ echo "==> --help"
 bash "$HERE/install_server.sh" --help > "$TMP/help.txt"
 check "aide : options listées" "--repo URL" "$TMP/help.txt"
 check "aide : --dry-run documenté" "--dry-run" "$TMP/help.txt"
+check "aide : --admin-email documenté" "--admin-email" "$TMP/help.txt"
+check_absent "aide : plus de jeton personnel" "jeton est affiché" "$TMP/help.txt"
 
 echo "==> Options invalides"
 if bash "$HERE/install_server.sh" --dry-run --dir /opt/wmlab --bidule 2>"$TMP/err1.txt"; then
   FAILS=$((FAILS + 1)); echo ' ✗ une option inconnue devrait échouer'
 else PASS=$((PASS + 1)); echo ' ✓ option inconnue refusée'; fi
-if bash "$HERE/install_server.sh" --dry-run --dir "$TMP/vide" --admin justin 2>"$TMP/err2.txt" >/dev/null; then
+if bash "$HERE/install_server.sh" --dry-run --dir "$TMP/vide" --admin justin --admin-email justin@example.com 2>"$TMP/err2.txt" >/dev/null; then
   FAILS=$((FAILS + 1)); echo ' ✗ sans --repo ni dépôt existant, le script devrait échouer'
 else check "sans --repo : message explicite" "--repo URL est obligatoire" "$TMP/err2.txt"; fi
 if bash "$HERE/install_server.sh" --dry-run --repo x --admin "Justin Reverdi" 2>"$TMP/err3.txt" >/dev/null; then
@@ -55,11 +59,19 @@ else check "--admin admin refusé (réservé au jeton serveur)" "réservé" "$TM
 if bash "$HERE/install_server.sh" --dry-run --repo x 2>"$TMP/err5.txt" >/dev/null; then
   FAILS=$((FAILS + 1)); echo ' ✗ sans --admin, le script devrait échouer'
 else check "--admin obligatoire" "--admin NAME est obligatoire" "$TMP/err5.txt"; fi
+if bash "$HERE/install_server.sh" --dry-run --repo x --admin justin 2>"$TMP/err6.txt" >/dev/null; then
+  FAILS=$((FAILS + 1)); echo ' ✗ sans --admin-email, le script devrait échouer'
+else check "--admin-email obligatoire" "--admin-email EMAIL est obligatoire" "$TMP/err6.txt"; fi
+for bad in "justin" "justin@" "@example.com" "justin@example" "jus tin@example.com" "justin@exa_mple.com"; do
+  if bash "$HERE/install_server.sh" --dry-run --repo x --admin justin --admin-email "$bad" 2>"$TMP/err7.txt" >/dev/null; then
+    FAILS=$((FAILS + 1)); echo " ✗ --admin-email « $bad » devrait être refusé"
+  else check "--admin-email « $bad » refusé" "adresse e-mail invalide" "$TMP/err7.txt"; fi
+done
 
 echo "==> Dry-run 1 : installation neuve (clonage dans un dossier inexistant)"
 OUT1="$TMP/dry1.txt"
 bash "$HERE/install_server.sh" --dry-run --repo git@github.com:equipe/wmlab.git --branch main \
-  --dir "$TMP/opt-wmlab" --domain lab.example.com --admin justin > "$OUT1" 2>&1
+  --dir "$TMP/opt-wmlab" --domain lab.example.com --admin justin --admin-email justin@example.com > "$OUT1" 2>&1
 [[ ! -e "$TMP/opt-wmlab" ]] && { PASS=$((PASS + 1)); echo ' ✓ dossier cible non créé'; } \
   || { FAILS=$((FAILS + 1)); echo ' ✗ le dry-run a créé le dossier cible'; }
 check "paquets apt (git rsync curl…)" 'apt-get install -y -qq git rsync curl' "$OUT1"
@@ -79,12 +91,23 @@ check "/etc/wmlab/env : WMLAB_WORKSPACE" 'WMLAB_WORKSPACE='"$TMP"'/opt-wmlab' "$
 check "/etc/wmlab/env : WMLAB_TOKEN généré" 'WMLAB_TOKEN=<openssl rand -hex 24>' "$OUT1"
 check "/etc/wmlab/env : SCW_SECRET_KEY commentée" '^ *\| # SCW_SECRET_KEY=' "$OUT1"
 check "/etc/wmlab/env : droits 0640 root:wmlab" 'écriture de /etc/wmlab/env \(0640, root:wmlab\)' "$OUT1"
-check "wmlab users add <admin> --role admin" 'wmlab\.cli users add justin --role admin' "$OUT1"
+check "wmlab users add <e-mail> --name <nom> --role admin" 'wmlab\.cli users add justin@example\.com --name justin --role admin' "$OUT1"
+check "mot de passe temporaire affiché une fois, à changer" "MOT DE PASSE TEMPORAIRE .*UNE FOIS" "$OUT1"
+check_absent "plus de jetons personnels (users revoke, wml_)" 'users revoke|jeton personnel|Le jeton ci-dessous' "$OUT1"
+check "/etc/wmlab/env : jeton serveur = secours, comptes e-mail" '^ *\| # Les membres se connectent par e-mail \+ mot de passe' "$OUT1"
+check ".wmlab en 0750" 'install -d -m 0750 -o wmlab -g wmlab .*/\.wmlab$' "$OUT1"
 check "unité systemd wmlab-server" 'écriture de /etc/systemd/system/wmlab-server\.service' "$OUT1"
 check "ExecStart conforme §12.7" 'ExecStart=.*/\.venv/bin/python -m wmlab\.cli server --port 8765 --host 127\.0\.0\.1 --workspace ' "$OUT1"
 check "service : User=wmlab, Restart=always, EnvironmentFile" 'Restart=always' "$OUT1"
 check "service : EnvironmentFile=/etc/wmlab/env" 'EnvironmentFile=/etc/wmlab/env' "$OUT1"
 check "systemctl enable wmlab-server" 'systemctl enable wmlab-server' "$OUT1"
+# Sans deploy/ cloné (dry-run 1), l'unité et le Caddyfile de repli doivent être durcis eux aussi.
+check "unité de repli : ProtectSystem=strict" '^ *\| ProtectSystem=strict$' "$OUT1"
+check "unité de repli : ReadWritePaths workspace + ~/.ssh" '^ *\| ReadWritePaths='"$TMP"'/opt-wmlab /home/wmlab/\.ssh$' "$OUT1"
+check "unité de repli : SystemCallFilter" '^ *\| SystemCallFilter=@system-service$' "$OUT1"
+check "unité de repli : CapabilityBoundingSet vide" '^ *\| CapabilityBoundingSet=$' "$OUT1"
+check "Caddyfile de repli : CSP (posée seulement si absente : ?)" "^ *\| +\?Content-Security-Policy \"default-src 'self'" "$OUT1"
+check "Caddyfile de repli : request_body 8MB" '^ *\| +max_size 8MB$' "$OUT1"
 check "Caddy : dépôt officiel cloudsmith" 'dl\.cloudsmith\.io/public/caddy/stable/gpg\.key' "$OUT1"
 check "Caddy : apt install caddy" 'apt-get install -y -qq caddy' "$OUT1"
 check "Caddyfile : domaine" '^ *\| lab\.example\.com \{' "$OUT1"
@@ -95,11 +118,15 @@ check "sauvegarde : dossier local" '/var/backups/wmlab' "$OUT1"
 check "workspace.yaml : patch hosted" 'patch_workspace\.py --file .*/workspace\.yaml --branch main --public-url https://lab\.example\.com' "$OUT1"
 check "workspace.yaml : skip-worktree (arbre propre pour GitSync)" 'update-index --skip-worktree workspace\.yaml' "$OUT1"
 check "résumé : URL publique" 'URL publique *: https://lab\.example\.com' "$OUT1"
+check "résumé : connexion par e-mail + mot de passe" 'Connexion *: e-mail \+ mot de passe' "$OUT1"
+check "résumé : jeton serveur = secours, comptes par users add" 'Jeton serveur .*secours admin.*comptes : wmlab users add EMAIL --name NAME' "$OUT1"
+check "résumé : premier admin" 'Premier admin *: justin@example\.com' "$OUT1"
 check "résumé : clé publique à déposer sur les machines GPU" 'machine GPU' "$OUT1"
 
 echo "==> Dry-run 2 : dépôt déjà cloné (le dépôt courant), sans domaine"
 OUT2="$TMP/dry2.txt"
-bash "$HERE/install_server.sh" --dry-run --dir "$ROOT" --branch main --admin owner > "$OUT2" 2>&1
+bash "$HERE/install_server.sh" --dry-run --dir "$ROOT" --branch main --admin owner --admin-email Owner@Example.COM > "$OUT2" 2>&1
+check "e-mail normalisé en minuscules" 'wmlab\.cli users add owner@example\.com --name owner --role admin' "$OUT2"
 check "mise à jour : fetch + pull --ff-only" 'git -C .* pull --ff-only origin main' "$OUT2"
 check_absent "pas de clone quand .git existe" 'git clone' "$OUT2"
 if grep -q '"cpu"' "$ROOT/pyproject.toml"; then
@@ -111,6 +138,7 @@ check "sans --domain : Caddy ignoré, tunnel SSH indiqué" 'pas de --domain' "$O
 check_absent "sans --domain : pas d'installation de caddy" 'apt-get install -y -qq caddy' "$OUT2"
 check "unité systemd prise dans deploy/ (marqueurs remplacés)" 'WorkingDirectory='"$ROOT"'$' "$OUT2"
 check_absent "aucun marqueur __WMLAB_ non remplacé" '__WMLAB_' "$OUT2"
+check "unité : ReadWritePaths = workspace + home/.ssh" '^ *\| ReadWritePaths='"$ROOT"' /home/wmlab/\.ssh$' "$OUT2"
 check "patch hosted affiché (dry-run) : enabled true" '^ *\| *enabled: true' "$OUT2"
 check "patch hosted : public_url null sans domaine" '^ *\| *public_url: null' "$OUT2"
 if git -C "$ROOT" diff --quiet -- workspace.yaml 2>/dev/null; then
@@ -118,6 +146,33 @@ if git -C "$ROOT" diff --quiet -- workspace.yaml 2>/dev/null; then
 else
   FAILS=$((FAILS + 1)); echo ' ✗ workspace.yaml du dépôt modifié par le dry-run'
 fi
+
+echo "==> Durcissement systemd (deploy/wmlab-server.service, ARCHITECTURE.md §12.7)"
+UNIT="$HERE/wmlab-server.service"
+for directive in 'ProtectSystem=strict' 'ReadWritePaths=__WMLAB_DIR__ __WMLAB_HOME__/\.ssh' \
+    'PrivateDevices=true' 'ProtectKernelTunables=true' 'ProtectKernelModules=true' \
+    'ProtectKernelLogs=true' 'ProtectControlGroups=true' 'ProtectClock=true' 'ProtectHostname=true' \
+    'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' 'RestrictNamespaces=true' \
+    'RestrictRealtime=true' 'RestrictSUIDSGID=true' 'LockPersonality=true' \
+    'SystemCallArchitectures=native' 'SystemCallFilter=@system-service' 'CapabilityBoundingSet=' \
+    'UMask=0027' 'NoNewPrivileges=true' 'PrivateTmp=true' 'KillMode=process' 'Restart=always'; do
+  check "unité : $directive" "^$directive\$" "$UNIT"
+done
+check_absent "unité : pas de ProtectHome (clé SSH sous le home)" '^ProtectHome=' "$UNIT"
+check_absent "unité : pas de home codé en dur" '^ReadWritePaths=.*/home/' "$UNIT"
+
+echo "==> En-têtes et journal du Caddyfile (deploy/Caddyfile)"
+CADDY="$HERE/Caddyfile"
+check "CSP complète (posée seulement si absente : ?)" "\?Content-Security-Policy \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'\"" "$CADDY"
+check "HSTS includeSubDomains" 'Strict-Transport-Security "max-age=31536000; includeSubDomains"' "$CADDY"
+check "X-Frame-Options DENY" 'X-Frame-Options "DENY"' "$CADDY"
+check "X-Content-Type-Options nosniff" 'X-Content-Type-Options "nosniff"' "$CADDY"
+check "Referrer-Policy no-referrer" 'Referrer-Policy "no-referrer"' "$CADDY"
+check "Permissions-Policy" 'Permissions-Policy "camera=\(\), microphone=\(\), geolocation=\(\)"' "$CADDY"
+check "request_body max_size 8MB" '^ +max_size 8MB$' "$CADDY"
+check "journal : chaîne de requête retirée de l'URL" '^ +request>uri regexp ' "$CADDY"
+check "journal : en-tête X-WMLab-Token supprimé" '^ +request>headers>X-Wmlab-Token delete$' "$CADDY"
+check "reverse_proxy vers le backend local" '^ +reverse_proxy 127\.0\.0\.1:__WMLAB_PORT__$' "$CADDY"
 
 echo "==> patch_workspace.py sur une copie"
 cp "$ROOT/workspace.yaml" "$TMP/ws.yaml"
@@ -135,9 +190,13 @@ if [[ -x "$ROOT/.venv/bin/python" ]]; then
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 assert d["hosted"] == {"enabled": True, "git_branch": "main", "auto_pull_s": 60, "auto_commit": True,
-                       "public_url": "https://lab.example.com"}, d["hosted"]
+                       "public_url": "https://lab.example.com", "allow_registration": True}, d["hosted"]
 PY
 fi
+python3 "$HERE/patch_workspace.py" --file "$TMP/ws.yaml" --allow-registration false >/dev/null
+check "inscription fermée (--allow-registration false)" '^  allow_registration: false' "$TMP/ws.yaml"
+python3 "$HERE/patch_workspace.py" --file "$TMP/ws.yaml" --branch main >/dev/null
+check "allow_registration conservé par un nouveau passage" '^  allow_registration: false' "$TMP/ws.yaml"
 
 echo "==> backup.sh en dry-run (mode local forcé)"
 mkdir -p "$TMP/ws/.wmlab/runs" "$TMP/ws/.wmlab/cache"

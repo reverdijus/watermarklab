@@ -6,16 +6,21 @@
  *     main process, or a remote server chosen through the "Serveur" menu — `mode`);
  *  2. Vite dev server in a browser: `VITE_API_BASE` / `VITE_API_TOKEN`;
  *  3. Browser served by FastAPI: `window.location.origin` (or a server URL chosen on the
- *     login screen) + `?token=` (then localStorage `wmlab.token`).
+ *     login screen) + the session token obtained by e-mail + password (`POST /api/auth/login`),
+ *     memorised in localStorage `wmlab.token`. `?token=` is never read from the URL (§10): a
+ *     token in a URL ends up in logs and history; only `fileUrl()` / `costsCsvUrl()` carry it.
  */
 import type {
   BenchmarkInfo,
   CompareResponse,
+  ChangePasswordBody,
   CreatedPath,
+  CreatedUser,
   CreateExperimentBody,
   CreateHpoPlanBody,
   CreateJobBody,
   CreateProjectBody,
+  CreateUserBody,
   Costs,
   DatasetInfo,
   DecommissionBody,
@@ -32,6 +37,8 @@ import type {
   JobEstimate,
   Leaderboard,
   LeaderboardQuery,
+  LoginBody,
+  LoginResult,
   LogsResponse,
   Me,
   MetricsResponse,
@@ -40,6 +47,8 @@ import type {
   PoweroffResult,
   ProjectDetail,
   ProjectSummary,
+  RegisterBody,
+  RegisterResult,
   RegistryResponse,
   RunDetail,
   RunsQuery,
@@ -49,6 +58,7 @@ import type {
   StudySummary,
   SystemResponse,
   UserInfo,
+  UserRole,
   ValidateBody,
   ValidateResult,
   WorkspaceSettings,
@@ -70,30 +80,9 @@ export interface ApiConfig {
 export const TOKEN_STORAGE_KEY = "wmlab.token";
 export const API_BASE_STORAGE_KEY = "wmlab.apiBase";
 
-function readTokenFromLocation(): string | null {
-  const fromSearch = new URLSearchParams(window.location.search).get("token");
-  if (fromSearch) return fromSearch;
-  const hash = window.location.hash;
-  const q = hash.indexOf("?");
-  if (q >= 0) return new URLSearchParams(hash.slice(q + 1)).get("token");
-  return null;
-}
-
-/** Remove `?token=` from the visible URL once it has been memorised. */
-function scrubTokenFromLocation(): void {
+function storageGet(key: string): string | null {
   try {
-    const url = new URL(window.location.href);
-    if (!url.searchParams.has("token")) return;
-    url.searchParams.delete("token");
-    window.history.replaceState(window.history.state, "", url.toString());
-  } catch {
-    /* ignore */
-  }
-}
-
-function storageGet(storage: "local" | "session", key: string): string | null {
-  try {
-    return (storage === "local" ? window.localStorage : window.sessionStorage).getItem(key);
+    return window.localStorage.getItem(key);
   } catch {
     return null;
   }
@@ -146,13 +135,9 @@ function detectConfig(): ApiConfig {
       mode: "remote",
     };
   }
-  // Browser: `?token=` wins and is memorised (localStorage, then the legacy sessionStorage
-  // entry of previous versions).
-  let token = readTokenFromLocation();
-  if (token) storageSet(TOKEN_STORAGE_KEY, token);
-  else token = storageGet("local", TOKEN_STORAGE_KEY) ?? storageGet("session", TOKEN_STORAGE_KEY);
-  scrubTokenFromLocation();
-  const storedBase = storageGet("local", API_BASE_STORAGE_KEY);
+  // Browser: session token memorised by the login screen (never read from the URL).
+  const token = storageGet(TOKEN_STORAGE_KEY);
+  const storedBase = storageGet(API_BASE_STORAGE_KEY);
   return {
     apiBase: (storedBase && normalizeApiBase(storedBase)) || window.location.origin,
     token: token ?? "",
@@ -176,8 +161,8 @@ export function isElectron(): boolean {
 }
 
 /**
- * Browser session (§12.6): memorise the token (and optionally the server URL when the page
- * is not served by the backend) after a successful login. In Electron the session is owned
+ * Browser session (§12.6): memorise the session token (and optionally the server URL when the
+ * page is not served by the backend) after a successful login. In Electron the session is owned
  * by the main process (config.json); this only updates the in-memory settings.
  */
 export function setSession(token: string, apiBase?: string | null): void {
@@ -190,18 +175,11 @@ export function setSession(token: string, apiBase?: string | null): void {
   }
 }
 
-/** Forget the token ("Se déconnecter"). The server URL is kept. */
+/** Forget the session token ("Se déconnecter"). The server URL is kept. */
 export function clearSession(): void {
   const current = getApiConfig();
   cachedConfig = { ...current, token: "" };
-  if (current.source === "browser") {
-    storageSet(TOKEN_STORAGE_KEY, null);
-    try {
-      window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-    } catch {
-      /* ignore */
-    }
-  }
+  if (current.source === "browser") storageSet(TOKEN_STORAGE_KEY, null);
 }
 
 /** Event dispatched on `window` whenever a request is refused with 401 (LoginGate listens). */
@@ -212,11 +190,25 @@ export interface ProbeResult {
   /** The server answered `/api/health` (public route). */
   reachable: boolean;
   version: string | null;
+  /** `Health.registration`: self-registration open (null when unknown / older backend). */
+  registration: boolean | null;
   /** `GET /api/me` with the token: the user, or null when the token was refused. */
   me: Me | null;
   /** Diagnostic (French) when reachable is false or the token was refused. */
   error: string | null;
 }
+
+/** Implicit user of an older backend without `/api/me` (token accepted, admin). */
+const LEGACY_ADMIN: Me = {
+  id: "",
+  name: "admin",
+  email: "",
+  role: "admin",
+  hosted: false,
+  public_url: null,
+  must_change_password: false,
+  auth: "server_token",
+};
 
 async function fetchJson(url: string, token: string | null, timeoutMs: number): Promise<{ status: number; body: unknown }> {
   const ctrl = new AbortController();
@@ -239,53 +231,58 @@ async function fetchJson(url: string, token: string | null, timeoutMs: number): 
 }
 
 /**
- * Login screen helper: checks that `apiBase` is a Watermark Lab backend (`/api/health`),
- * then that `token` is accepted (`/api/me`). Never throws. Note: an older backend without
- * `/api/me` answers 404 — the token is then considered accepted when `/api/health` returned
- * `workspace` (only sent to an authenticated request).
+ * Login screen helper: checks that `apiBase` is a Watermark Lab backend (`/api/health`, public:
+ * also tells whether self-registration is open), then — with a token — that the session is
+ * accepted (`/api/me`). Never throws. An older backend without `/api/me` answers 404: the
+ * token is then considered accepted when `/api/health` returned `workspace` (only sent to an
+ * authenticated request).
  */
 export async function probeConnection(apiBase: string, token: string, timeoutMs = 8000): Promise<ProbeResult> {
   const base = apiBase.replace(/\/+$/, "");
+  const unreachable = (error: string): ProbeResult => ({ reachable: false, version: null, registration: null, me: null, error });
   let health: { status: number; body: unknown };
   try {
     health = await fetchJson(`${base}/api/health`, token || null, timeoutMs);
   } catch {
-    return { reachable: false, version: null, me: null, error: `Serveur injoignable : ${base}` };
+    return unreachable(`Serveur injoignable : ${base}`);
   }
-  const hb = health.body as { ok?: unknown; version?: unknown; workspace?: unknown } | null;
+  const hb = health.body as { ok?: unknown; version?: unknown; workspace?: unknown; registration?: unknown } | null;
   if (health.status !== 200 || !hb || typeof hb !== "object" || hb.ok !== true) {
-    return { reachable: false, version: null, me: null, error: `${base} ne répond pas comme un backend Watermark Lab (HTTP ${health.status}).` };
+    return unreachable(`${base} ne répond pas comme un backend Watermark Lab (HTTP ${health.status}).`);
   }
   const version = typeof hb.version === "string" ? hb.version : null;
-  if (!token) return { reachable: true, version, me: null, error: null };
+  const registration = typeof hb.registration === "boolean" ? hb.registration : null;
+  const ok = { reachable: true, version, registration };
+  if (!token) return { ...ok, me: null, error: null };
   let me: { status: number; body: unknown };
   try {
     me = await fetchJson(`${base}/api/me`, token, timeoutMs);
   } catch {
-    return { reachable: true, version, me: null, error: "Le serveur n'a pas répondu à la vérification du jeton." };
+    return { ...ok, me: null, error: "Le serveur n'a pas répondu à la vérification de la session." };
   }
   if (me.status === 200 && me.body && typeof me.body === "object" && typeof (me.body as Me).name === "string") {
-    return { reachable: true, version, me: me.body as Me, error: null };
+    return { ...ok, me: me.body as Me, error: null };
   }
-  if (me.status === 404 && typeof hb.workspace === "string") {
-    return { reachable: true, version, me: { name: "admin", role: "admin", hosted: false, public_url: null }, error: null };
-  }
+  if (me.status === 404 && typeof hb.workspace === "string") return { ...ok, me: LEGACY_ADMIN, error: null };
   if (me.status === 401 || me.status === 403 || me.status === 404) {
-    return { reachable: true, version, me: null, error: "Jeton refusé par le serveur. Vérifiez-le ou demandez-en un nouveau à un administrateur." };
+    return { ...ok, me: null, error: "Session refusée par le serveur (expirée ou révoquée) : reconnectez-vous." };
   }
-  return { reachable: true, version, me: null, error: detailFromBody(me.body, statusFallback(me.status)) };
+  return { ...ok, me: null, error: detailFromBody(me.body, statusFallback(me.status)) };
 }
 
 /** Error raised for any failed request; `detail` is the backend message (French when possible). */
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
+  /** `Retry-After` (seconds) of a 429, when the server sent it. */
+  readonly retryAfter: number | null;
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, retryAfter: number | null = null) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -334,12 +331,15 @@ function detailFromBody(body: unknown, fallback: string): string {
   return fallback;
 }
 
-function statusFallback(status: number): string {
-  if (status === 401) return "Jeton refusé : connectez-vous avec un jeton valide.";
+function statusFallback(status: number, retryAfter: number | null = null): string {
+  if (status === 401) return "Session expirée ou refusée : reconnectez-vous.";
   if (status === 403) return "Action réservée aux administrateurs.";
   if (status === 404) return "Ressource introuvable.";
   if (status === 409) return "Conflit : l'opération n'est pas possible dans l'état actuel.";
   if (status === 422) return "Requête invalide.";
+  if (status === 429) {
+    return retryAfter ? `Trop de tentatives : réessayez dans ${Math.max(1, Math.ceil(retryAfter / 60))} min.` : "Trop de tentatives : réessayez plus tard.";
+  }
   if (status >= 500) return `Erreur interne du backend (${status}).`;
   return `Erreur HTTP ${status}.`;
 }
@@ -350,9 +350,18 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
+interface RequestTarget {
+  /** Server to call instead of the current session's (login screen with another URL). */
+  apiBase?: string;
+  /** Public route (§9): no token header. */
+  anonymous?: boolean;
+}
+
 /** Low-level request helper (JSON in, JSON out). */
-export async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-  const { apiBase, token } = getApiConfig();
+export async function request<T>(method: string, path: string, opts: RequestOptions & RequestTarget = {}): Promise<T> {
+  const config = getApiConfig();
+  const apiBase = (opts.apiBase ?? config.apiBase).replace(/\/+$/, "");
+  const token = opts.anonymous ? "" : config.token;
   const headers: Record<string, string> = { Accept: "application/json" };
   if (token) headers["X-WMLab-Token"] = token;
   let body: BodyInit | undefined;
@@ -382,14 +391,19 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     }
   }
   if (!res.ok) {
-    if (res.status === 401) {
+    // A 401 on an authenticated route means the session is gone (expired, revoked, account
+    // disabled): the LoginGate takes over. The /api/auth/* routes answer 401 for a wrong
+    // password: that is a form error, not a lost session.
+    if (res.status === 401 && token && !path.startsWith("/api/auth/")) {
       try {
         window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
       } catch {
         /* no window (tests) */
       }
     }
-    throw new ApiError(res.status, detailFromBody(data, statusFallback(res.status)));
+    const retryAfterHeader = Number(res.headers.get("Retry-After"));
+    const retryAfter = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : null;
+    throw new ApiError(res.status, detailFromBody(data, statusFallback(res.status, retryAfter)), retryAfter);
   }
   return data as T;
 }
@@ -432,6 +446,8 @@ export async function downloadCostsCsv(filename = "watermark-lab-couts.csv"): Pr
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
+
+const userAction = <T>(id: string, action: string, body?: unknown) => post<T>(`/api/users/${enc(id)}/${action}`, body);
 
 /** All §9 routes. */
 export const api = {
@@ -519,9 +535,23 @@ export const api = {
   getSettings: () => get<WorkspaceSettings>("/api/settings"),
   saveSettings: (settings: WorkspaceSettings) => put<WorkspaceSettings>("/api/settings", settings),
 
-  // §12 — users & git (hosted mode)
+  // §12.2 — accounts and sessions. `login` / `register` are public and may target another
+  // server than the current session (login screen with a server URL).
+  login: (body: LoginBody, apiBase?: string) => request<LoginResult>("POST", "/api/auth/login", { body, apiBase, anonymous: true }),
+  register: (body: RegisterBody, apiBase?: string) =>
+    request<RegisterResult>("POST", "/api/auth/register", { body, apiBase, anonymous: true }),
+  logout: () => post<OkResponse>("/api/auth/logout"),
+  changePassword: (body: ChangePasswordBody) => post<OkResponse>("/api/auth/password", body),
   me: (signal?: AbortSignal) => get<Me>("/api/me", undefined, signal),
   listUsers: () => get<UserInfo[]>("/api/users"),
+  createUser: (body: CreateUserBody) => post<CreatedUser>("/api/users", body),
+  approveUser: (id: string, role: UserRole) => userAction<UserInfo>(id, "approve", { role }),
+  setUserRole: (id: string, role: UserRole) => userAction<UserInfo>(id, "role", { role }),
+  disableUser: (id: string) => userAction<UserInfo>(id, "disable"),
+  enableUser: (id: string) => userAction<UserInfo>(id, "enable"),
+  resetUserPassword: (id: string) => userAction<CreatedUser>(id, "reset-password"),
+
+  // §12.3 — git (hosted mode)
   git: (signal?: AbortSignal) => get<GitState>("/api/git", undefined, signal),
   gitPull: () => post<GitState>("/api/git/pull"),
 };

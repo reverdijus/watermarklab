@@ -30,13 +30,14 @@ import {
   useToast,
   type TabItem,
 } from "../components/ui";
+import { AdminOnlyNotice } from "../components/AdminOnly";
 import { RunProgress, TagEditor } from "../components/RunBits";
 import { useLaunch } from "../components/launch/LaunchProvider";
 import { ApiError, errorMessage } from "../lib/api";
 import { formatDate, formatDuration, formatEur, formatInt, formatRelative, shortId } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { hasRetrievalIssue } from "../lib/hosted";
-import { useJobs, useRun, useSetRunTags, useStopRun } from "../lib/queries";
+import { useJobs, usePermissions, useRun, useSetRunTags, useStopRun } from "../lib/queries";
 import { experimentPath, isActiveStatus, isPrunedTrial, projectPath, runDuration, runPath, studyPath } from "../lib/runs";
 import type { RunDetail as RunDetailData } from "../lib/types";
 import { OverviewTab } from "./run/OverviewTab";
@@ -55,6 +56,7 @@ type TabId = "overview" | "metrics" | "system" | "checkpoints" | "evals" | "samp
 const TAB_IDS: TabId[] = ["overview", "metrics", "system", "checkpoints", "evals", "samples", "logs", "config", "env", "notes"];
 
 function RunHeader({ run }: { run: RunDetailData }) {
+  const { canWrite, canViewCode } = usePermissions();
   const { openLaunch } = useLaunch();
   const stop = useStopRun();
   const setTags = useSetRunTags(run.run_id);
@@ -110,9 +112,13 @@ function RunHeader({ run }: { run: RunDetailData }) {
               {project}
             </Link>
             <span className="text-faint">/</span>
-            <Link to={experimentPath(project, run.experiment)} className="no-drag hover:text-fg">
-              {run.experiment}
-            </Link>
+            {canViewCode ? (
+              <Link to={experimentPath(project, run.experiment)} className="no-drag hover:text-fg">
+                {run.experiment}
+              </Link>
+            ) : (
+              <span>{run.experiment}</span>
+            )}
           </span>
         }
         title={
@@ -123,19 +129,21 @@ function RunHeader({ run }: { run: RunDetailData }) {
           </span>
         }
         actions={
-          <>
-            {live && (
-              <Button variant="danger" icon={Square} onClick={() => void onStop()} loading={stop.isPending}>
-                Arrêter
+          canWrite ? (
+            <>
+              {live && (
+                <Button variant="danger" icon={Square} onClick={() => void onStop()} loading={stop.isPending}>
+                  Arrêter
+                </Button>
+              )}
+              <Button icon={GitBranch} onClick={branch} disabled={!run.checkpoints.length && !live}>
+                Brancher
               </Button>
-            )}
-            <Button icon={GitBranch} onClick={branch} disabled={!run.checkpoints.length && !live}>
-              Brancher
-            </Button>
-            <Button icon={Microscope} onClick={evaluate} disabled={!run.checkpoints.length}>
-              Évaluer
-            </Button>
-          </>
+              <Button icon={Microscope} onClick={evaluate} disabled={!run.checkpoints.length}>
+                Évaluer
+              </Button>
+            </>
+          ) : undefined
         }
         meta={
           <>
@@ -179,17 +187,20 @@ function RunHeader({ run }: { run: RunDetailData }) {
           </>
         }
       />
-      <TagEditor
-        tags={run.tags}
-        className="-mt-3 mb-6"
-        onChange={async (tags) => {
-          try {
-            await setTags.mutateAsync(tags);
-          } catch (err) {
-            toast.error("Tags non enregistrés", errorMessage(err));
-          }
-        }}
-      />
+      {(canWrite || run.tags.length > 0) && (
+        <TagEditor
+          tags={run.tags}
+          disabled={!canWrite}
+          className="-mt-3 mb-6"
+          onChange={async (tags) => {
+            try {
+              await setTags.mutateAsync(tags);
+            } catch (err) {
+              toast.error("Tags non enregistrés", errorMessage(err));
+            }
+          }}
+        />
+      )}
       {live && (
         <div className="mb-6 rounded-xl border border-border bg-surface px-4 py-3 shadow-sm">
           {run.progress ? (
@@ -258,7 +269,9 @@ function RunHeader({ run }: { run: RunDetailData }) {
           {retrievalIssue.missing.length
             ? `${retrievalIssue.missing.length} checkpoint${retrievalIssue.missing.length > 1 ? "s" : ""} encore sur ${run.host} : ${retrievalIssue.missing.slice(0, 4).join(", ")}${retrievalIssue.missing.length > 4 ? "…" : ""}.`
             : `La synchronisation de fin de job depuis ${run.host} n'a pas pu vérifier tous les checkpoints.`}{" "}
-          Lancez « Rapatrier les checkpoints » depuis la page Machines avant de retirer la machine.
+          {canWrite
+            ? "Lancez « Rapatrier les checkpoints » depuis la page Machines avant de retirer la machine."
+            : "Un administrateur doit les rapatrier depuis la page Machines avant de retirer la machine."}
         </Callout>
       )}
       {run.status === "lost" && (
@@ -276,8 +289,11 @@ export default function RunDetail() {
   const runId = decodeURIComponent(id);
   const [params, setParams] = useSearchParams();
   const run = useRun(runId);
+  const { canViewCode } = usePermissions();
+  // Logs hold commands and tracebacks: admin only (§9); a member's ?tab=logs falls back to the overview.
+  const tabIds = canViewCode ? TAB_IDS : TAB_IDS.filter((t) => t !== "logs");
   const tabParam = params.get("tab") as TabId | null;
-  const tab: TabId = tabParam && TAB_IDS.includes(tabParam) ? tabParam : "overview";
+  const tab: TabId = tabParam && tabIds.includes(tabParam) ? tabParam : "overview";
   const setTab = (t: TabId) => {
     const next = new URLSearchParams(params);
     if (t === "overview") next.delete("tab");
@@ -318,7 +334,7 @@ export default function RunDetail() {
     { id: "checkpoints", label: "Checkpoints", count: data.checkpoints.length || null },
     { id: "evals", label: "Évaluations", count: data.evals.length || null },
     { id: "samples", label: "Échantillons", count: data.samples.length || null },
-    { id: "logs", label: "Logs" },
+    ...(canViewCode ? [{ id: "logs" as const, label: "Logs" }] : []),
     { id: "config", label: "Configuration" },
     { id: "env", label: "Environnement" },
     { id: "notes", label: "Notes" },
@@ -334,9 +350,9 @@ export default function RunDetail() {
       {tab === "checkpoints" && <CheckpointsTab run={data} />}
       {tab === "evals" && <EvalsTab run={data} />}
       {tab === "samples" && <SamplesTab run={data} />}
-      {tab === "logs" && <LogsTab run={data} live={live} />}
-      {tab === "config" && <ConfigTab run={data} />}
-      {tab === "env" && <EnvTab run={data} />}
+      {tab === "logs" && canViewCode && <LogsTab run={data} live={live} />}
+      {tab === "config" && <ConfigTab run={data} restricted={!canViewCode} restrictedNotice={<AdminOnlyNotice compact what="Configuration réservée aux administrateurs : la spécification, les overrides et le code du run ne sont pas visibles avec un compte membre." />} />}
+      {tab === "env" && <EnvTab run={data} restricted={!canViewCode} />}
       {tab === "notes" && <NotesTab run={data} />}
     </Page>
   );

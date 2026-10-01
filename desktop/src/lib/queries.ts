@@ -10,14 +10,17 @@ import {
   useQueryClient,
   type Query,
 } from "@tanstack/react-query";
-import { api, ApiError } from "./api";
+import { api, ApiError, getApiConfig } from "./api";
+import { permissionsFor, type Permissions } from "./auth";
 import { useDebouncedValue } from "./hooks";
 import { isActiveStatus } from "./runs";
 import type {
+  ChangePasswordBody,
   CreateExperimentBody,
   CreateHpoPlanBody,
   CreateJobBody,
   CreateProjectBody,
+  CreateUserBody,
   DecommissionBody,
   EstimateBody,
   GitState,
@@ -32,6 +35,8 @@ import type {
   RunSummary,
   StudyDetail,
   StudySummary,
+  UserInfo,
+  UserRole,
   ValidateBody,
   WorkspaceSettings,
 } from "./types";
@@ -297,8 +302,9 @@ export function useCosts() {
   return useQuery({ queryKey: qk.costs, queryFn: api.costs, refetchInterval: IDLE_INTERVAL });
 }
 
-export function useSettings() {
-  return useQuery({ queryKey: qk.settings, queryFn: api.getSettings, staleTime: 30000 });
+/** Workspace settings (`GET /api/settings`, admin only: pass `enabled: canWrite`). */
+export function useSettings(opts: { enabled?: boolean } = {}) {
+  return useQuery({ queryKey: qk.settings, queryFn: api.getSettings, enabled: opts.enabled ?? true, staleTime: 30000 });
 }
 
 // §12 — hosted mode -----------------------------------------------------------
@@ -323,14 +329,27 @@ export function useMe(opts: { enabled?: boolean } = {}) {
   });
 }
 
-/** Convenience: `{name, role}` of the current user, or null while unknown. */
+/** Convenience: the current user, or null while unknown. */
 export function useCurrentUser(): Me | null {
   const me = useMe();
   return me.data ?? null;
 }
 
+/**
+ * What the interface lets the current user do (§12.6): `member` = read-only without access to
+ * the code. Electron in local mode is an implicit admin (server token); an unknown user
+ * (loading, older backend, network error) is read-only — the server stays the authority.
+ */
+export function usePermissions(): Permissions {
+  const config = getApiConfig();
+  const implicitAdmin = config.source === "electron" && config.mode === "local";
+  const me = useMe({ enabled: !implicitAdmin && !!config.token });
+  return permissionsFor(me.data, { implicitAdmin, loading: me.isPending && me.fetchStatus !== "idle" });
+}
+
+/** Accounts of the team (admin); polled slowly for the « en attente » badge of the sidebar. */
 export function useUsers(enabled = true) {
-  return useQuery({ queryKey: qk.users, queryFn: api.listUsers, enabled, staleTime: 30000, retry: 0 });
+  return useQuery({ queryKey: qk.users, queryFn: api.listUsers, enabled, staleTime: 30000, retry: 0, refetchInterval: IDLE_INTERVAL * 2 });
 }
 
 /** Git state of the server checkout (`GET /api/git`); polled slowly (auto pull runs server-side). */
@@ -561,6 +580,52 @@ export function useSyncJob() {
     mutationFn: (jobId: string) => api.syncJob(jobId),
     onSuccess: (job) =>
       invalidate(["jobs"], ["runs"], ["studies"], qk.overview, ...(job.run_id ? [qk.run(job.run_id)] : [])),
+  });
+}
+
+// §12.2 — accounts ----------------------------------------------------------------
+
+/** Change one's own password; refreshes `/api/me` (`must_change_password` cleared). */
+export function useChangePassword() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: (body: ChangePasswordBody) => api.changePassword(body),
+    onSuccess: () => invalidate(qk.me),
+  });
+}
+
+export function useCreateUser() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: (body: CreateUserBody) => api.createUser(body),
+    onSuccess: () => invalidate(qk.users),
+  });
+}
+
+export type UserAction = { kind: "approve" | "role"; id: string; role: UserRole } | { kind: "disable" | "enable"; id: string };
+
+/** Approve / change role / disable / enable an account (admin); returns the updated `UserInfo`. */
+export function useUserAction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (action: UserAction): Promise<UserInfo> => {
+      if (action.kind === "approve") return api.approveUser(action.id, action.role);
+      if (action.kind === "role") return api.setUserRole(action.id, action.role);
+      if (action.kind === "disable") return api.disableUser(action.id);
+      return api.enableUser(action.id);
+    },
+    onSuccess: (user) => {
+      qc.setQueryData(qk.users, (old: UserInfo[] | undefined) => (old ? old.map((u) => (u.id === user.id ? user : u)) : old));
+      return qc.invalidateQueries({ queryKey: qk.users });
+    },
+  });
+}
+
+export function useResetUserPassword() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: (id: string) => api.resetUserPassword(id),
+    onSuccess: () => invalidate(qk.users),
   });
 }
 

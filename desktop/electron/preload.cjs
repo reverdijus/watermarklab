@@ -18,7 +18,7 @@ try {
     };
   }
 } catch {
-  // Main process without the handler (tests): the renderer falls back to ?token= / storage.
+  // Main process without the handler (tests): the renderer falls back to its stored session.
 }
 
 contextBridge.exposeInMainWorld("wmlab", {
@@ -30,6 +30,6 @@ contextBridge.exposeInMainWorld("wmlab", {
   openConnectDialog: () => ipcRenderer.send("wmlab:open-connect-dialog"),
   /** Menu "Serveur → Utiliser le backend local". */
   useLocalBackend: () => ipcRenderer.send("wmlab:use-local-backend"),
-  /** Remote mode: forget the stored token, then reopen the connection dialog. */
+  /** Remote mode: revoke the session (best effort), forget it, then reopen the connection dialog. */
   disconnect: () => ipcRenderer.send("wmlab:disconnect"),
 });

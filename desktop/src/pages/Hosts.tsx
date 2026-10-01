@@ -47,7 +47,7 @@ import { HostInventoryPanel } from "../components/hosts/HostInventoryPanel";
 import { errorMessage } from "../lib/api";
 import { formatBytes, formatDate, formatDay, formatEur, formatInt, formatRelative, plural } from "../lib/format";
 import { decommissionBlockers, describeRetrieveResult } from "../lib/hosted";
-import { qk, useHosts, useJobs, useMe, usePoweroffHost, useRetrieveHost, useSaveHosts, useSetupHost, useTestHost } from "../lib/queries";
+import { qk, useHosts, useJobs, usePermissions, usePoweroffHost, useRetrieveHost, useSaveHosts, useSetupHost, useTestHost } from "../lib/queries";
 import { byNewest, isActiveStatus, JOB_KIND_LABELS } from "../lib/runs";
 import type { Host, HostTestResult, Job } from "../lib/types";
 
@@ -205,10 +205,12 @@ function HostCard({
             <div className="mt-0.5 truncate text-[12.5px] text-muted">{host.gpu || (isSsh ? "GPU non renseigné" : "Ce Mac (MPS / CPU)")}</div>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-0.5">
-          {!retired && <IconButton icon={Pencil} label="Modifier" size="sm" onClick={onEdit} />}
-          {host.name !== "local" && <IconButton icon={Trash2} label={retired ? "Supprimer de la liste" : "Supprimer"} size="sm" onClick={onDelete} />}
-        </div>
+        {isAdmin && (
+          <div className="flex shrink-0 items-center gap-0.5">
+            {!retired && <IconButton icon={Pencil} label="Modifier" size="sm" onClick={onEdit} />}
+            {host.name !== "local" && <IconButton icon={Trash2} label={retired ? "Supprimer de la liste" : "Supprimer"} size="sm" onClick={onDelete} />}
+          </div>
+        )}
       </div>
 
       <div className="mt-4 grid grid-cols-3 gap-3 border-y border-border py-3">
@@ -255,9 +257,10 @@ function HostCard({
 
       <TestResultBlock state={test} />
       {isSsh && <RetrieveStatus job={lastRetrieve} />}
-      {isSsh && <HostInventoryPanel host={host} enabled={showInventory} />}
+      {/* Inventory and Scaleway state: admin only (§9); a member sees no action at all. */}
+      {isSsh && isAdmin && <HostInventoryPanel host={host} enabled={showInventory} />}
 
-      {!retired && (
+      {!retired && isAdmin && (
         <div className="mt-auto flex flex-wrap items-center gap-2 pt-4">
           <Button size="sm" icon={PlugZap} onClick={onTest} loading={test?.pending}>
             Tester la connexion
@@ -565,7 +568,7 @@ function Help() {
 export default function Hosts() {
   const hosts = useHosts();
   const jobs = useJobs();
-  const me = useMe();
+  const { isAdmin } = usePermissions();
   const test = useTestHost();
   const setup = useSetupHost();
   const retrieve = useRetrieveHost();
@@ -577,8 +580,6 @@ export default function Hosts() {
   const [dialog, setDialog] = useState<{ host: Host | null } | null>(null);
   const [decommission, setDecommission] = useState<Host | null>(null);
   const list = hosts.data ?? [];
-  // Unknown user (backend without /api/me): the buttons stay visible, the server decides.
-  const isAdmin = !me.data || me.data.role === "admin";
 
   const runRetrieve = async (host: Host) => {
     try {
@@ -658,9 +659,11 @@ export default function Hosts() {
         title="Machines"
         description="Où tournent les entraînements : ce Mac et les serveurs GPU accessibles en SSH (Scaleway…). Aucune machine n'est retirée tant que ses checkpoints ne sont pas rapatriés."
         actions={
-          <Button variant="primary" icon={Plus} onClick={() => setDialog({ host: null })}>
-            Ajouter une machine
-          </Button>
+          isAdmin ? (
+            <Button variant="primary" icon={Plus} onClick={() => setDialog({ host: null })}>
+              Ajouter une machine
+            </Button>
+          ) : undefined
         }
       />
 
@@ -721,20 +724,22 @@ export default function Hosts() {
           <EmptyState
             icon={Server}
             title="Aucune machine"
-            description="Ajoutez ce Mac (local) et vos serveurs GPU pour lancer des entraînements."
+            description={isAdmin ? "Ajoutez ce Mac (local) et vos serveurs GPU pour lancer des entraînements." : "Aucune machine n'est déclarée sur le serveur."}
             action={
-              <Button variant="primary" icon={Plus} onClick={() => setDialog({ host: null })}>
-                Ajouter une machine
-              </Button>
+              isAdmin ? (
+                <Button variant="primary" icon={Plus} onClick={() => setDialog({ host: null })}>
+                  Ajouter une machine
+                </Button>
+              ) : undefined
             }
           />
         </Card>
       )}
 
-      <Help />
+      {isAdmin && <Help />}
 
-      {dialog && <HostDialog initial={dialog.host} hosts={list} onClose={() => setDialog(null)} />}
-      {decommission && (
+      {isAdmin && dialog && <HostDialog initial={dialog.host} hosts={list} onClose={() => setDialog(null)} />}
+      {isAdmin && decommission && (
         <DecommissionDialog
           host={decommission}
           activeJobs={jobsByHost(decommission.name).filter((j) => isActiveStatus(j.status) && j.kind !== "retrieve").length}

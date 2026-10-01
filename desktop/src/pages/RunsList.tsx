@@ -20,7 +20,7 @@ import { errorMessage } from "../lib/api";
 import { formatEur, formatRelative, plural, shortId, toDate } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { qualityMetricFor } from "../lib/metrics";
-import { useHosts, useMe, useProjects, useRuns } from "../lib/queries";
+import { useHosts, useMe, usePermissions, useProjects, useRuns } from "../lib/queries";
 import { isPrunedTrial, progressFraction, runPath, RUN_STATUSES, STATUS_LABELS } from "../lib/runs";
 import type { RunSummary } from "../lib/types";
 
@@ -31,6 +31,7 @@ export default function RunsList() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   const now = useNow(30000);
   const [selected, setSelected] = useState<string[]>([]);
 
@@ -160,9 +161,11 @@ export default function RunsList() {
         title="Runs"
         description="Tous les entraînements du workspace, locaux et distants."
         actions={
-          <Button variant="primary" icon={Rocket} onClick={() => openLaunch()}>
-            Nouveau lancement
-          </Button>
+          canWrite ? (
+            <Button variant="primary" icon={Rocket} onClick={() => openLaunch()}>
+              Nouveau lancement
+            </Button>
+          ) : undefined
         }
       />
 
@@ -269,6 +272,8 @@ export default function RunsList() {
         empty={
           hasFilters ? (
             "Aucun run ne correspond à ces filtres."
+          ) : !canWrite ? (
+            "Aucun run pour l'instant."
           ) : (
             <span>
               Aucun run pour l'instant.{" "}

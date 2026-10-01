@@ -252,13 +252,13 @@ def test_git_routes_and_file_commit(repo: tuple[GitRepo, Path], ws: Path, tmp_pa
     assert saved["saved"] and saved["git"]["pushed"] is True and saved["git"]["error"] is None
     assert saved["git"]["committed"] == git(bare, "rev-parse", "main")
     assert git(ws, "log", "-1", "--format=%s|%an") == f"app(admin): {SPEC}|admin"
-    # a plugin file too, under the user's name
-    from helpers_server import add_user_token
+    # a plugin file too, under the user's name (an admin account: members are read-only)
+    from helpers_server import add_user_session
 
-    member_token = add_user_token(ws, "marie", "member")
+    marie_token = add_user_session(ws, "marie", "admin")
     plugin = "lab/metrics/mine.py"
     saved = client.put("/api/files", json={"path": plugin, "content": "# plugin\n"},
-                       headers={"X-WMLab-Token": member_token}).json()
+                       headers={"X-WMLab-Token": marie_token}).json()
     assert saved["git"]["pushed"] and git(ws, "log", "-1", "--format=%an|%ae") == "marie|marie@wmlab.local"
     # push failure ⇒ 200, committed but not pushed
     git(ws, "remote", "set-url", "origin", str(bare.parent / "gone.git"))

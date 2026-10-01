@@ -5,7 +5,8 @@ Rewrites only the top-level ``hosted:`` block (or appends one), keeping every ot
 comment and blank line untouched. Standard library only: runs with any python3.
 
     patch_workspace.py --file workspace.yaml --branch main [--public-url https://lab.example.com]
-                       [--auto-pull-s 60] [--auto-commit true|false] [--disable] [--dry-run]
+                       [--auto-pull-s 60] [--auto-commit true|false]
+                       [--allow-registration true|false] [--disable] [--dry-run]
 """
 from __future__ import annotations
 
@@ -14,9 +15,10 @@ import re
 import sys
 from pathlib import Path
 
-HOSTED_KEYS = ("enabled", "git_branch", "auto_pull_s", "auto_commit", "public_url")
+HOSTED_KEYS = ("enabled", "git_branch", "auto_pull_s", "auto_commit", "public_url",
+               "allow_registration")
 DEFAULTS = {"enabled": "false", "git_branch": "main", "auto_pull_s": "60",
-            "auto_commit": "true", "public_url": "null"}
+            "auto_commit": "true", "public_url": "null", "allow_registration": "true"}
 TOP_LEVEL = re.compile(r"^[A-Za-z_][\w-]*\s*:")
 CHILD = re.compile(r"^(\s+)([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*(#.*)?$")
 
@@ -34,7 +36,8 @@ def render_block(values: dict[str, str]) -> list[str]:
                 "git_branch": "branche suivie par le serveur (git pull --ff-only)",
                 "auto_pull_s": "0 = désactivé",
                 "auto_commit": "PUT /api/files → commit + push",
-                "public_url": "affichée dans l'UI"}
+                "public_url": "affichée dans l'UI",
+                "allow_registration": "inscription depuis l'écran de connexion (comptes en attente)"}
     for key in HOSTED_KEYS:
         lines.append(f"  {key}: {values[key]}    # {comments[key]}")
     return lines
@@ -83,6 +86,8 @@ def main() -> int:
     ap.add_argument("--public-url", help="hosted.public_url")
     ap.add_argument("--auto-pull-s", type=int)
     ap.add_argument("--auto-commit", choices=["true", "false"])
+    ap.add_argument("--allow-registration", choices=["true", "false"],
+                    help="hosted.allow_registration (défaut : valeur actuelle, sinon true)")
     ap.add_argument("--disable", action="store_true", help="hosted.enabled: false (défaut : true)")
     ap.add_argument("--dry-run", action="store_true", help="affiche le résultat sans écrire")
     args = ap.parse_args()
@@ -98,6 +103,8 @@ def main() -> int:
         updates["auto_pull_s"] = str(args.auto_pull_s)
     if args.auto_commit:
         updates["auto_commit"] = args.auto_commit
+    if args.allow_registration:
+        updates["allow_registration"] = args.allow_registration
     original = args.file.read_text(encoding="utf-8")
     result = patch(original, updates)
     if args.dry_run:

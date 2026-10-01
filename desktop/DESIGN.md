@@ -90,9 +90,21 @@ Composants métier (`src/components`) :
 - `launch/LaunchProvider` — `const { openLaunch } = useLaunch(); openLaunch({ kind, project, experiment, plan, host, overrides, smoke, maxHours, initFrom, evalRun, evalCheckpoint, benchmark })`.
   Le dialogue porte le champ « Révision git » (pré-rempli `branche @ sha` depuis `useGit()`,
   `gitRefForLaunch()` décide du `git_ref` envoyé) et n'offre jamais une machine retirée.
-- `LoginGate` (mode équipe, §12.6) — enveloppe l'app : écran de connexion tant qu'aucun jeton n'est
-  accepté (navigateur), écran « connexion requise / jeton refusé » en Electron distant, passage
-  direct en Electron local. `const { logout } = useSession()` pour « Se déconnecter ».
+- `LoginGate` (mode équipe, §12.6) — enveloppe l'app : écran de connexion e-mail + mot de passe
+  tant qu'aucune session n'est acceptée (navigateur ; lien « Créer un compte » → formulaire
+  d'inscription, masqué si `Health.registration === false` ; messages du serveur affichés tels
+  quels), écran « Connexion requise / Session expirée » en Electron distant (le dialogue de
+  connexion est dans le main process), écran plein « Définir un nouveau mot de passe » tant que
+  `Me.must_change_password`, passage direct en Electron local. `const { logout } = useSession()`
+  pour « Se déconnecter » (révoque la session, au mieux, puis l'oublie).
+- `AdminOnly` — `RequireCode` enveloppe une route qui montre du code (éditeurs YAML, bibliothèque) :
+  « Réservé aux administrateurs » pour un membre, sans monter la page ; `AdminOnlyNotice` (`what`,
+  `compact`, `action`) remplace un bloc réservé (configuration d'un run…).
+- `account/PasswordChangeForm` — `me`, `onChanged`, `submitLabel` : mot de passe actuel / nouveau /
+  confirmation (`POST /api/auth/password`), validation locale `validatePasswordChange`.
+- `account/UsersCard` — `meId` : Réglages → Utilisateurs (tableau des comptes, approbation avec
+  choix du rôle, changement de rôle, désactivation / réactivation, réinitialisation, « Créer un
+  compte » ; le mot de passe temporaire n'est montré qu'une fois, avec bouton copier).
 - `hosts/HostInventoryPanel` — `host`, `enabled` : inventaire d'une machine (runs présents,
   checkpoints non rapatriés, jobs actifs, état de l'instance Scaleway) ; `instanceStateLabel()`.
 - `hosts/DecommissionDialog` — `host`, `activeJobs`, `onClose` : « Retirer la machine » (récapitulatif
@@ -119,25 +131,39 @@ texte toujours en couleurs de texte, jamais en couleur de série.
 ## 5. Données (`src/lib`)
 
 - `types.ts` : toutes les interfaces du §9 + corps/réponses des routes (`CreateJobBody`, `ProjectDetail`…).
-- `api.ts` : `api.<route>()` pour chaque route (§9 et §12 : `me`, `listUsers`, `git`, `gitPull`,
-  `hostInventory`, `retrieveHost`, `decommissionHost`, `poweroffHost`, `hostInstance`),
-  `fileUrl(runId, path)`, `costsCsvUrl()`, `downloadCostsCsv()`, `ApiError` (`status`, `detail`),
-  `errorMessage(err)`. Session : `getApiConfig()` (`apiBase`, `token`, `source` electron/vite-env/browser,
-  `mode` local/remote), `probeConnection(apiBase, token)` (`/api/health` puis `/api/me`, ne lève jamais),
-  `setSession()` / `clearSession()` (localStorage `wmlab.token` / `wmlab.apiBase`, toujours en
-  try/catch), `normalizeApiBase()` ; tout 401 émet l'événement `UNAUTHORIZED_EVENT` sur `window`.
+- `api.ts` : `api.<route>()` pour chaque route (§9 et §12 : `login(body, apiBase?)`,
+  `register(body, apiBase?)` (publiques, sans jeton, éventuellement vers un autre serveur),
+  `logout`, `changePassword`, `me`, `listUsers`, `createUser`, `approveUser`, `setUserRole`,
+  `disableUser`, `enableUser`, `resetUserPassword`, `git`, `gitPull`, `hostInventory`,
+  `retrieveHost`, `decommissionHost`, `poweroffHost`, `hostInstance`),
+  `fileUrl(runId, path)` et `costsCsvUrl()` (seules URL qui portent le jeton en `?token=`),
+  `downloadCostsCsv()`, `ApiError` (`status`, `detail`, `retryAfter` d'un 429), `errorMessage(err)`.
+  Session : `getApiConfig()` (`apiBase`, `token`, `source` electron/vite-env/browser, `mode`
+  local/remote ; `?token=` n'est jamais lu dans l'URL), `probeConnection(apiBase, token)`
+  (`/api/health` — dont `registration` — puis `/api/me`, ne lève jamais), `setSession()` /
+  `clearSession()` (localStorage `wmlab.token` / `wmlab.apiBase`, toujours en try/catch),
+  `normalizeApiBase()` ; tout 401 d'une route authentifiée (hors `/api/auth/*`) émet l'événement
+  `UNAUTHORIZED_EVENT` sur `window`.
+- `auth.ts` (sans React, testé dans `tests/auth.test.ts`) : `permissionsFor(me, {implicitAdmin,
+  loading})`, `normalizeEmail`, `isValidEmail`, `userNameError`, `passwordError` (12 à 256
+  caractères, ni l'e-mail ni l'identifiant), `validateLogin`, `validateRegistration`,
+  `validatePasswordChange`, `validateNewUser`, `isValid(errors)`, `ROLE_LABELS`,
+  `USER_STATUS_LABELS` / `USER_STATUS_TONES`, `userRowActions(user, meId)`, `pendingCount(users)`.
 - `queries.ts` : un hook par lecture (`useOverview`, `useProjects`, `useProject`, `useFile`,
   `useValidation`, `useExperimentPlan`, `useRegistry`, `useRuns`, `useRun`, `useRunMetrics`,
   `useRunSystem`, `useRunLogs`, `useCompare`, `useStudies`, `useStudy`, `useLeaderboard`,
-  `useBenchmarks`, `useDatasets`, `useHosts`, `useJobs`, `useJobEstimate`, `useCosts`, `useSettings`,
-  et §12 : `useMe` / `useCurrentUser`, `useUsers`, `useGit`, `useHostInventory`, `useHostInstance`)
+  `useBenchmarks`, `useDatasets`, `useHosts`, `useJobs`, `useJobEstimate`, `useCosts`, `useSettings({enabled})`,
+  et §12 : `useMe` / `useCurrentUser`, `usePermissions` (`{role, isAdmin, canWrite, canViewCode,
+  loading}`), `useUsers`, `useGit`, `useHostInventory`, `useHostInstance`)
   et par écriture (`useCreateProject`, `useCreateExperiment`, `useCreateHpoPlan`, `useSaveFile`,
   `useValidate`, `useSetRunNotes`, `useSetStudyNotes`, `useSetRunTags`, `useStopRun`, `useFetchCheckpoint`,
   `useSaveHosts`, `useTestHost`, `useSetupHost`, `useCreateJob`, `useEstimateJob`, `useCancelJob`,
   `useSyncJob`, `useSaveSettings`, et §12 : `useGitPull`, `useRetrieveHost`, `useDecommissionHost`,
-  `usePoweroffHost`) ; invalidations déjà câblées ; `errorStatus(err)` donne le statut HTTP d'une
-  erreur. `useMe` n'est jamais relancé (`retry: 0`) : un 401 rend la main au `LoginGate`, un 404
-  (backend antérieur au §12) laisse l'app utilisable avec un utilisateur inconnu. Polling (`refetchInterval`,
+  `usePoweroffHost`, `useChangePassword`, `useCreateUser`, `useUserAction` (approve / role / disable /
+  enable), `useResetUserPassword`) ; invalidations déjà câblées ; `errorStatus(err)` donne le statut
+  HTTP d'une erreur. `useMe` n'est jamais relancé (`retry: 0`) : un 401 rend la main au `LoginGate`,
+  un 404 (backend antérieur au §12) laisse l'app utilisable avec un utilisateur inconnu (en lecture
+  seule, sauf Electron local). `useUsers` est interrogé toutes les 60 s (badge « en attente »). Polling (`refetchInterval`,
   constantes `LIVE_INTERVAL` = 5 s et `IDLE_INTERVAL` = 30 s dans `queries.ts`) : les listes
   (`useOverview`, `useRuns`, `useStudies`, `useJobs`) et `useProjects` passent en rythme
   « live » (5 s ; projets 10 s) tant qu'un élément est actif (run / étude / job en cours), sinon
@@ -173,8 +199,13 @@ texte toujours en couleurs de texte, jamais en couleur de série.
 - **Liens** vers runs / études / projets via `runPath()` etc. ; liens externes en `<a target="_blank">`
   (ouverts dans le navigateur par Electron, seuls `http(s):` et `mailto:` passent).
 - **Mode équipe** : l'auteur s'affiche en « par <nom> » sous l'identifiant (runs, études, jobs, en-tête
-  du run) ; les boutons réservés aux administrateurs (`useMe().data?.role === "admin"`) restent visibles
-  quand l'utilisateur est inconnu (le serveur tranche en 403) ; un job dont `retrieval` est `partial` /
+  du run) ; **rôles** : `const { canWrite, canViewCode, isAdmin } = usePermissions()` — un membre
+  (lecture seule, §12.6) ne voit aucun bouton d'écriture (lancer, créer, éditer, arrêter, annoter,
+  machines), aucun lien vers le code (éditeurs YAML, bibliothèque, journaux : masqués, ou
+  `RequireCode` / `AdminOnlyNotice`) et aucune requête **admin** n'est émise (`useSettings({enabled})`,
+  `useUsers(isAdmin)`…) ; un utilisateur inconnu est en lecture seule (Electron local = admin
+  implicite) ; le serveur reste l'autorité (403 → message « Action réservée aux administrateurs ») ;
+  un job dont `retrieval` est `partial` /
   `failed` porte un avertissement `text-warning` (listes) ou un `Callout tone="warning"` (page du run)
   qui renvoie vers la page Machines ; un champ optionnel du contrat (`user`, `git_sha`, `scaleway`…)
   est toujours lu avec `?.` / `??` pour tolérer un backend plus ancien.
@@ -186,6 +217,10 @@ texte toujours en couleurs de texte, jamais en couleur de série.
 - Statuts : En file, Lancement, En cours, Terminé, Échec, Arrêté, Perdu.
 - Mode équipe : « Rapatrier les checkpoints », « Retirer la machine », « Éteindre l'instance »,
   « Se connecter », « Se déconnecter », « Tirer maintenant », « par <nom> », « Révision git » ;
+  comptes : « Créer un compte », « Demander un compte », « Approuver », « Changer le rôle »,
+  « Désactiver » / « Réactiver », « Réinitialiser le mot de passe », « Mon compte », « Définir un
+  nouveau mot de passe », « Réservé aux administrateurs » ; états : en attente, actif, désactivé ;
+  rôles : administrateur, membre (jamais « jeton personnel ») ;
   instance Scaleway : en marche, éteinte, arrêtée (volumes conservés), extinction…, démarrage….
 - Unités : « 38,20 dB », « 93,4 % », « 12,5 h », « 1,40 €/h », « 46 Mo ».
 - Termes consacrés conservés en anglais quand usuels : run, checkpoint, benchmark, step, smoke, override.

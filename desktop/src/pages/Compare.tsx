@@ -24,7 +24,7 @@ import { differingParams, intersectKeys } from "../components/analysis";
 import { api, errorMessage } from "../lib/api";
 import { formatDuration, formatEur, formatNumber, shortId } from "../lib/format";
 import { formatMetric, formatMetricAxis, groupMetricKeys, isBetter, metricDirection, metricLabel, qualityMetricFor, smoothSeries } from "../lib/metrics";
-import { LIVE_INTERVAL, qk, useCompare, useRuns } from "../lib/queries";
+import { LIVE_INTERVAL, qk, useCompare, usePermissions, useRuns } from "../lib/queries";
 import { isActiveStatus, runDuration, runPath } from "../lib/runs";
 import type { RunDetail } from "../lib/types";
 
@@ -82,6 +82,7 @@ export default function Compare() {
     [params],
   );
   const [showAll, setShowAll] = useState(false);
+  const { canViewCode } = usePermissions();
   const [smoothing, setSmoothing] = useState(0);
 
   const details = useQueries({
@@ -130,8 +131,9 @@ export default function Compare() {
     .filter((r) => !runIds.includes(r.run_id))
     .map((r) => ({ value: r.run_id, label: `${r.project} · ${r.experiment} · ${shortId(r.run_id)}` }));
 
-  // Params that differ (or all), plus a few context rows.
-  const paramKeys = showAll ? [...new Set(loaded.flatMap((r) => Object.keys(r.params ?? {})))].sort() : differingParams(loaded);
+  // Params that differ (or all), plus a few context rows. A member gets no params (§9):
+  // context rows only.
+  const paramKeys = !canViewCode ? [] : showAll ? [...new Set(loaded.flatMap((r) => Object.keys(r.params ?? {})))].sort() : differingParams(loaded);
   const contextRows: RowDef[] = ([
     { key: "project", label: "Projet", values: loaded.map((r) => r.project) },
     { key: "experiment", label: "Expérience", values: loaded.map((r) => r.experiment) },
@@ -338,13 +340,21 @@ export default function Compare() {
             <Card padding="none" className="overflow-hidden">
               <div className="px-5 pt-4">
                 <CardHeader
-                  title="Paramètres"
-                  description={showAll ? "Tous les paramètres aplatis (run.json)." : "Seuls les paramètres qui diffèrent sont affichés."}
+                  title={canViewCode ? "Paramètres" : "Contexte"}
+                  description={
+                    !canViewCode
+                      ? showAll
+                        ? "Projet, expérience, machine, durée et coût."
+                        : "Seules les valeurs qui diffèrent sont affichées."
+                      : showAll
+                        ? "Tous les paramètres aplatis (run.json)."
+                        : "Seuls les paramètres qui diffèrent sont affichés."
+                  }
                   actions={<Switch size="sm" checked={showAll} onChange={setShowAll} label="Tout afficher" />}
                   className="mb-3"
                 />
               </div>
-              <ComparisonTable runs={loaded} rows={paramRows} colors={colors} empty="Tous les paramètres sont identiques." />
+              <ComparisonTable runs={loaded} rows={paramRows} colors={colors} empty={canViewCode ? "Tous les paramètres sont identiques." : "Rien ne diffère."} />
             </Card>
             <Card padding="none" className="overflow-hidden">
               <div className="px-5 pt-4">

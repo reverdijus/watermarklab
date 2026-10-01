@@ -124,7 +124,10 @@ class GitRepo:
         return bool(status)
 
     def remote(self) -> str | None:
-        return self.out("remote", "get-url", "origin") or None
+        """URL of ``origin`` without embedded credentials (``https://user:token@host`` →
+        ``https://host``)."""
+        url = self.out("remote", "get-url", "origin") or None
+        return re.sub(r"^([a-z][a-z0-9+.-]*://)[^/@]+@", r"\1", url) if url else None
 
     def ahead_behind(self, branch: str | None) -> tuple[int | None, int | None]:
         if not branch or not valid_ref(branch):

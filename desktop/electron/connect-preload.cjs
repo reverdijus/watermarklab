@@ -1,19 +1,20 @@
 /**
  * Preload of the "Se connecter à un serveur distant…" dialog (electron/main.cjs). The page
  * itself is a static HTML form without any script (CSP `script-src 'none'`): this preload
- * wires the form to the main process, which validates the URL + token (`/api/health`, then
- * `/api/me`) and stores them (§12.6).
+ * wires the form to the main process, which checks the URL (`/api/health`), logs in with the
+ * e-mail and password (`POST /api/auth/login`) and stores only the session token (§12.6).
  */
 const { ipcRenderer } = require("electron");
 
 window.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("form");
   const urlInput = document.getElementById("url");
-  const tokenInput = document.getElementById("token");
+  const emailInput = document.getElementById("email");
+  const passwordInput = document.getElementById("password");
   const status = document.getElementById("status");
   const submit = document.getElementById("submit");
   const cancel = document.getElementById("cancel");
-  if (!form || !urlInput || !tokenInput || !status || !submit || !cancel) return;
+  if (!form || !urlInput || !emailInput || !passwordInput || !status || !submit || !cancel) return;
 
   try {
     const initial = ipcRenderer.sendSync("wmlab:connect-initial");
@@ -21,7 +22,7 @@ window.addEventListener("DOMContentLoaded", () => {
   } catch {
     /* no initial value */
   }
-  (urlInput.value ? tokenInput : urlInput).focus();
+  (urlInput.value ? emailInput : urlInput).focus();
 
   const setStatus = (text, kind) => {
     status.textContent = text;
@@ -31,15 +32,22 @@ window.addEventListener("DOMContentLoaded", () => {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const apiBase = urlInput.value.trim();
-    const token = tokenInput.value.trim();
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
     if (!apiBase) return setStatus("Indiquez l'adresse du serveur.", "error");
-    if (!token) return setStatus("Indiquez votre jeton.", "error");
+    if (!email) return setStatus("Indiquez votre e-mail.", "error");
+    if (!password) return setStatus("Indiquez votre mot de passe.", "error");
     submit.disabled = true;
-    setStatus("Vérification…", "");
+    setStatus("Connexion…", "");
     try {
-      const res = await ipcRenderer.invoke("wmlab:connect", { apiBase, token });
-      if (res && res.ok) setStatus(`Connecté en tant que ${res.name}.`, "ok");
-      else setStatus((res && res.error) || "Connexion impossible.", "error");
+      const res = await ipcRenderer.invoke("wmlab:connect", { apiBase, email, password });
+      if (res && res.ok) {
+        passwordInput.value = "";
+        setStatus(`Connecté en tant que ${res.name}.`, "ok");
+      } else {
+        setStatus((res && res.error) || "Connexion impossible.", "error");
+        passwordInput.select();
+      }
     } catch (err) {
       setStatus(`Connexion impossible : ${err && err.message ? err.message : err}`, "error");
     } finally {

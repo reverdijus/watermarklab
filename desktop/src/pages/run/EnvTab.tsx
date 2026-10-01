@@ -15,7 +15,9 @@ function entries(obj: Record<string, unknown> | null, skip: string[] = []): KeyV
     .map(([k, v]) => ({ label: k, value: s(v), mono: typeof v !== "string" || /^[\w./:-]+$/.test(String(v)) }));
 }
 
-export function EnvTab({ run }: { run: RunDetail }) {
+/** `restricted` (member, §9): git, diff, command and launch file are not sent by the server. */
+export function EnvTab({ run, restricted = false }: { run: RunDetail; restricted?: boolean }) {
+  const reserved = <div className="text-[13px] text-muted">Réservé aux administrateurs.</div>;
   const { git, git_diff, hardware, command, launch, pip_freeze_lines } = run.env;
   const gpus = (hardware?.gpus as { name?: string; memory_gb?: number }[] | undefined) ?? [];
   const dirty = git?.dirty === true;
@@ -36,6 +38,8 @@ export function EnvTab({ run }: { run: RunDetail }) {
               { label: "Remote", value: s(git.remote), mono: true },
             ]}
           />
+        ) : restricted ? (
+          reserved
         ) : (
           <div className="text-[13px] text-muted">Informations git indisponibles (dépôt absent ou non capturé).</div>
         )}
@@ -59,7 +63,7 @@ export function EnvTab({ run }: { run: RunDetail }) {
 
       <Card className="xl:col-span-2">
         <CardHeader title="Commande" description={`${formatInt(pip_freeze_lines)} paquets figés dans env/pip_freeze.txt`} />
-        {command ? <CodeBlock code={command} wrap maxHeight={160} /> : <div className="text-[13px] text-muted">command.txt absent.</div>}
+        {command ? <CodeBlock code={command} wrap maxHeight={160} /> : restricted ? reserved : <div className="text-[13px] text-muted">command.txt absent.</div>}
       </Card>
 
       {launch && (

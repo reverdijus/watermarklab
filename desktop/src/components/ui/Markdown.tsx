@@ -8,8 +8,16 @@ import { Fragment, useMemo, type ReactNode } from "react";
  * (nested by indentation), blockquotes, horizontal rules and pipe tables.
  */
 
+/**
+ * Inline syntax. Every lazy span is bounded (`{0,N}`) so a note or an hypothesis made of
+ * thousands of `*`, `_` or backticks cannot make the matcher backtrack for seconds
+ * (the text comes from run folders and YAML written by other people).
+ */
 const INLINE_RE =
-  /(`+)([\s\S]*?[^`])\1(?!`)|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|~~([\s\S]+?)~~|\*([^*\s][^*]*?)\*|(?<![\w\\])_([^_\s][^_]*?)_(?![\w])|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+  /(`{1,3})([^`\n][\s\S]{0,400}?[^`])\1(?!`)|\[([^\]\n]{1,200})\]\(([^)\s]{1,500})(?:\s+"[^"\n]{0,200}")?\)|\*\*([^\n]{1,400}?)\*\*|__([^\n]{1,400}?)__|~~([^\n]{1,400}?)~~|\*([^*\s][^*\n]{0,400}?)\*|(?<![\w\\])_([^_\s][^_\n]{0,400}?)_(?![\w])|(https?:\/\/[^\s<>()]{1,500}[^\s<>().,;:!?'"])/g;
+
+/** Above this length a line is rendered as plain text (no inline parsing). */
+const INLINE_MAX_CHARS = 20000;
 
 function safeHref(href: string): string | null {
   const h = href.trim();
@@ -37,6 +45,7 @@ function renderLink(href: string, children: ReactNode, key: string): ReactNode {
 
 /** Render inline Markdown into React nodes. */
 export function renderInline(text: string, keyPrefix = "i"): ReactNode[] {
+  if (text.length > INLINE_MAX_CHARS) return [text];
   const out: ReactNode[] = [];
   let last = 0;
   let n = 0;

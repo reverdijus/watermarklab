@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import sys
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -27,7 +28,7 @@ app = typer.Typer(
 new_app = typer.Typer(help="Créer un projet, une expérience, un plan HPO ou un squelette de "
                            "plugin.", no_args_is_help=True)
 runs_app = typer.Typer(help="Lister et inspecter les runs.", no_args_is_help=True)
-users_app = typer.Typer(help="Utilisateurs et jetons du mode hébergé (.wmlab/users.yaml).",
+users_app = typer.Typer(help="Comptes du mode hébergé (.wmlab/users.yaml) : e-mail, rôle, état.",
                         no_args_is_help=True)
 weights_app = typer.Typer(help="Poids officiels pré-entraînés des baselines (hors dépôt).",
                           no_args_is_help=True)
@@ -638,58 +639,167 @@ def _users_file() -> Path:
     raise AssertionError  # unreachable
 
 
-@users_app.command("add", help="Créer un utilisateur et afficher son jeton (une seule fois).")
-def users_add(
-    name: str = typer.Argument(..., help="Nom de l'utilisateur (lettres, chiffres, '_', '-', '.')."),
-    role: str = typer.Option("member", "--role", help="admin ou member."),
-) -> None:
-    from wmlab.users import UserError, add_user
+def _users_store() -> Any:
+    from wmlab.users import UserStore
 
-    path = _users_file()
+    return UserStore(_users_file().parent)
+
+
+def _user_by_email(store: Any, email: str) -> Any:
+    user = store.by_email(email)
+    if user is None:
+        _fail(f"aucun compte avec l'adresse « {email} » (wmlab users list)")
+    return user
+
+
+def _show_temporary_password(email: str, password: str) -> None:
+    console = _out()
+    console.print(f"Mot de passe temporaire : [bold]{escape(password)}[/bold]")
+    console.print("[dim]Affiché une seule fois ; à transmettre par un canal sûr, à changer à la "
+                  f"première connexion (e-mail {escape(email)}, app menu Serveur ou navigateur).[/dim]")
+
+
+@users_app.command("add", help="Créer un compte actif ; mot de passe temporaire affiché UNE fois "
+                                "(sauf --password-stdin).")
+def users_add(
+    email: str = typer.Argument(..., help="Adresse e-mail (identifiant de connexion)."),
+    name: str = typer.Option(..., "--name", help="Identifiant d'équipe (lettres, chiffres, '_', "
+                                                "'-', '.') : auteur des runs."),
+    role: str = typer.Option("member", "--role", help="admin ou member (lecture seule)."),
+    password_stdin: bool = typer.Option(False, "--password-stdin",
+                                        help="Lire le mot de passe sur l'entrée standard "
+                                             "(une ligne) au lieu d'en générer un temporaire."),
+) -> None:
+    from wmlab.users import UserError
+
+    password: str | None = None
+    if password_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+        if not password:
+            _fail("--password-stdin : aucun mot de passe lu sur l'entrée standard")
+    store = _users_store()
     try:
-        user, token = add_user(name, role, path)
+        user, temporary = store.add(email, name, role, password=password, by="cli")
     except UserError as exc:
-        _fail(str(exc))
+        _fail(exc.message)
         return
     console = _out()
-    console.print(f"[green]Utilisateur créé :[/green] {escape(user.name)} ({escape(user.role)})")
-    console.print(f"Jeton (affiché une seule fois, à transmettre à l'utilisateur) : "
-                  f"[bold]{escape(token)}[/bold]")
-    console.print(f"[dim]Fichier : {escape(str(path))}[/dim]")
+    console.print(f"[green]Compte créé :[/green] {escape(user.email)} — {escape(user.name)} "
+                  f"({escape(user.role)}, actif)")
+    if temporary:
+        _show_temporary_password(user.email, temporary)
+    console.print(f"[dim]Fichier : {escape(str(store.users_path))}[/dim]")
 
 
-@users_app.command("list", help="Lister les utilisateurs (actifs et révoqués).")
+@users_app.command("list", help="Lister les comptes (e-mail, identifiant, rôle, état).")
 def users_list(as_json: bool = typer.Option(False, "--json", help="Sortie JSON.")) -> None:
-    from wmlab.users import load_users
-
-    users = load_users(_users_file())
+    store = _users_store()
+    broken = store.broken()
+    if broken:
+        _fail(broken)
+    users = store.users()
+    legacy = store.legacy_entries()
     if as_json:
         _echo_json([u.to_api() for u in users])
         return
     console = _out()
     if not users:
-        console.print("[dim]Aucun utilisateur (wmlab users add NAME --role admin|member).[/dim]")
-        return
-    table = Table(header_style="bold")
-    for column in ("Nom", "Rôle", "Créé le", "Révoqué le"):
-        table.add_column(column)
-    for user in users:
-        style = "dim" if user.revoked_at else ""
-        table.add_row(escape(user.name), escape(user.role), escape(user.created_at),
-                      escape(user.revoked_at or "—"), style=style)
-    console.print(table)
+        console.print("[dim]Aucun compte (wmlab users add EMAIL --name NAME --role admin|member).[/dim]")
+    else:
+        table = Table(header_style="bold")
+        for column in ("E-mail", "Identifiant", "Rôle", "État", "Créé le", "Dernière connexion"):
+            table.add_column(column)
+        labels = {"pending": "[yellow]en attente[/yellow]", "active": "[green]actif[/green]",
+                  "disabled": "[red]désactivé[/red]"}
+        for user in users:
+            table.add_row(escape(user.email), escape(user.name), escape(user.role),
+                          labels.get(user.status, escape(user.status)), escape(user.created_at),
+                          escape(user.last_login_at or "—"),
+                          style="dim" if user.status == "disabled" else "")
+        console.print(table)
+    if legacy:
+        names = ", ".join(escape(e["name"]) for e in legacy)
+        console.print(f"[yellow]Ancien format (jetons wml_) ignoré :[/yellow] {names} — recréer "
+                      "ces comptes avec « wmlab users add EMAIL --name NAME ».")
 
 
-@users_app.command("revoke", help="Révoquer le jeton d'un utilisateur.")
-def users_revoke(name: str = typer.Argument(..., help="Nom de l'utilisateur.")) -> None:
-    from wmlab.users import UserError, revoke_user
+@users_app.command("approve", help="Approuver une inscription en attente (rôle member par défaut).")
+def users_approve(
+    email: str = typer.Argument(..., help="Adresse e-mail du compte en attente."),
+    role: str = typer.Option("member", "--role", help="admin ou member."),
+) -> None:
+    from wmlab.users import UserError
 
+    store = _users_store()
+    user = _user_by_email(store, email)
     try:
-        user = revoke_user(name, _users_file())
+        user = store.approve(user.id, role, by="cli")
     except UserError as exc:
-        _fail(str(exc))
+        _fail(exc.message)
         return
-    _out().print(f"[yellow]Jeton révoqué :[/yellow] {escape(user.name)} ({escape(user.revoked_at or '')})")
+    _out().print(f"[green]Compte approuvé :[/green] {escape(user.email)} ({escape(user.role)})")
+
+
+@users_app.command("role", help="Changer le rôle d'un compte (admin ou member).")
+def users_role(
+    email: str = typer.Argument(..., help="Adresse e-mail du compte."),
+    role: str = typer.Argument(..., help="admin ou member."),
+) -> None:
+    from wmlab.users import CLI_ACTOR, UserError
+
+    store = _users_store()
+    user = _user_by_email(store, email)
+    try:
+        user = store.set_role(user.id, role, CLI_ACTOR)
+    except UserError as exc:
+        _fail(exc.message)
+        return
+    _out().print(f"[green]Rôle mis à jour :[/green] {escape(user.email)} → {escape(user.role)}")
+
+
+@users_app.command("disable", help="Désactiver un compte et révoquer ses sessions.")
+def users_disable(email: str = typer.Argument(..., help="Adresse e-mail du compte.")) -> None:
+    from wmlab.users import CLI_ACTOR, UserError
+
+    store = _users_store()
+    user = _user_by_email(store, email)
+    try:
+        user = store.disable(user.id, CLI_ACTOR)
+    except UserError as exc:
+        _fail(exc.message)
+        return
+    _out().print(f"[yellow]Compte désactivé :[/yellow] {escape(user.email)} "
+                 f"({escape(user.disabled_at or '')})")
+
+
+@users_app.command("enable", help="Réactiver un compte désactivé.")
+def users_enable(email: str = typer.Argument(..., help="Adresse e-mail du compte.")) -> None:
+    from wmlab.users import CLI_ACTOR, UserError
+
+    store = _users_store()
+    user = _user_by_email(store, email)
+    try:
+        user = store.enable(user.id, CLI_ACTOR)
+    except UserError as exc:
+        _fail(exc.message)
+        return
+    _out().print(f"[green]Compte réactivé :[/green] {escape(user.email)}")
+
+
+@users_app.command("reset-password", help="Nouveau mot de passe temporaire (affiché UNE fois) ; "
+                                           "les sessions du compte sont révoquées.")
+def users_reset_password(email: str = typer.Argument(..., help="Adresse e-mail du compte.")) -> None:
+    from wmlab.users import CLI_ACTOR, UserError
+
+    store = _users_store()
+    user = _user_by_email(store, email)
+    try:
+        user, temporary = store.reset_password(user.id, CLI_ACTOR)
+    except UserError as exc:
+        _fail(exc.message)
+        return
+    _out().print(f"[green]Mot de passe réinitialisé :[/green] {escape(user.email)}")
+    _show_temporary_password(user.email, temporary)
 
 
 # -- official pretrained weights ------------------------------------------------------------

@@ -33,7 +33,7 @@ import {
 import { errorMessage } from "../../lib/api";
 import { formatDate, formatNumber, formatRelative, plural, shortId, toDate } from "../../lib/format";
 import { formatMetric, formatMetricAxis, metricInfo, metricLabel, parseConstraint, satisfies, type Constraint } from "../../lib/metrics";
-import { useLeaderboard } from "../../lib/queries";
+import { useLeaderboard, usePermissions } from "../../lib/queries";
 import { runPath } from "../../lib/runs";
 import type { LeaderRow, Objective, ProjectSummary } from "../../lib/types";
 
@@ -123,6 +123,7 @@ export interface LeaderboardViewProps {
 export function LeaderboardView({ project, groupByProject }: LeaderboardViewProps) {
   const navigate = useNavigate();
   const { openLaunch } = useLaunch();
+  const { canWrite } = usePermissions();
   const [params, setParams] = useSearchParams();
   const defaultSource: Source = project?.best?.source === "val" ? "val" : "benchmark";
   const source: Source = params.get("source") === "val" ? "val" : params.get("source") === "benchmark" ? "benchmark" : defaultSource;
@@ -416,9 +417,11 @@ export function LeaderboardView({ project, groupByProject }: LeaderboardViewProp
               action={
                 <>
                   <Button onClick={() => setParam("source", "val")}>Voir la validation</Button>
-                  <Button variant="primary" icon={Microscope} onClick={() => openLaunch({ kind: "eval", project: project?.name })}>
-                    Évaluer un checkpoint
-                  </Button>
+                  {canWrite && (
+                    <Button variant="primary" icon={Microscope} onClick={() => openLaunch({ kind: "eval", project: project?.name })}>
+                      Évaluer un checkpoint
+                    </Button>
+                  )}
                 </>
               }
             />
@@ -428,9 +431,11 @@ export function LeaderboardView({ project, groupByProject }: LeaderboardViewProp
               title="Aucun run avec des métriques de validation"
               description="Les runs apparaissent ici dès leur première validation (val/*)."
               action={
-                <Button variant="primary" icon={Rocket} onClick={() => openLaunch({ project: project?.name })}>
-                  Nouveau lancement
-                </Button>
+                canWrite ? (
+                  <Button variant="primary" icon={Rocket} onClick={() => openLaunch({ project: project?.name })}>
+                    Nouveau lancement
+                  </Button>
+                ) : undefined
               }
             />
           )}
